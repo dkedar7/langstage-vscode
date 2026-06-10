@@ -33,22 +33,23 @@ async function handler(
   const agentSpec = config.get<string>('agentSpec') ?? '';
   const python = config.get<string>('pythonPath') || 'python';
 
-  if (!agentSpec) {
-    stream.markdown(
-      '⚠️ No agent configured. Set **`deepagent.agentSpec`** in settings ' +
-        "(e.g. `./my_agent.py:graph`).",
-    );
-    return;
-  }
-
   const workspace =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
-  const proc = spawn(
-    python,
-    ['-m', 'deepagent_vscode', '--agent', agentSpec, '--workspace', workspace],
-    { env: { ...process.env, DEEPAGENT_WORKSPACE_ROOT: workspace } },
-  );
+  // When the setting is empty, spawn without --agent and let the sidecar
+  // resolve the family-standard chain (deepagents.toml < DEEPAGENT_* env).
+  // If nothing resolves anywhere, the sidecar emits a clean `error` event
+  // that the dispatcher renders in the chat.
+  const args = ['-m', 'deepagent_vscode', '--workspace', workspace];
+  if (agentSpec) {
+    args.push('--agent', agentSpec);
+  }
+
+  const proc = spawn(python, args, {
+    // cwd anchors the sidecar's deepagents.toml walk-up at the workspace.
+    cwd: workspace,
+    env: { ...process.env, DEEPAGENT_WORKSPACE_ROOT: workspace },
+  });
 
   token.onCancellationRequested(() => proc.kill());
 
