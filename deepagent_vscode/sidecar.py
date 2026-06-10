@@ -114,37 +114,72 @@ def _run_turn(
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
 
 
+# The keyless echo agent shipped with the shared core — see `--demo`.
+DEMO_AGENT_SPEC = "langgraph_stream_parser.demo.stub:graph"
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import os
     import sys
 
+    from langgraph_stream_parser.host import HostConfig
+
     parser = argparse.ArgumentParser(prog="deepagent-vscode-sidecar")
     parser.add_argument(
         "--agent",
-        default=os.getenv("DEEPAGENT_AGENT_SPEC"),
-        help="Agent spec 'path.py:var' or 'module:var' (or DEEPAGENT_AGENT_SPEC).",
+        default=None,
+        help="Agent spec 'path.py:var' or 'module:var' "
+        "(overrides DEEPAGENT_AGENT_SPEC / deepagents.toml [agent].spec).",
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("DEEPAGENT_WORKSPACE_ROOT", "."),
-        help="Workspace root (or DEEPAGENT_WORKSPACE_ROOT).",
+        default=None,
+        help="Workspace root (overrides DEEPAGENT_WORKSPACE_ROOT / deepagents.toml).",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run with the built-in keyless demo agent — no API key needed.",
+    )
+    parser.add_argument(
+        "--show-config",
+        action="store_true",
+        help="Print the resolved configuration (defaults < deepagents.toml < env < CLI) and exit.",
     )
     args = parser.parse_args(argv)
+
+    # Same resolution chain as every other deep-agent surface:
+    # defaults < deepagents.toml < DEEPAGENT_* env < CLI flags.
+    cfg = HostConfig.resolve(
+        overrides={"agent_spec": args.agent, "workspace_root": args.workspace}
+    )
+
+    if args.show_config:
+        print(cfg.describe())
+        return 0
 
     def fail(msg: str) -> int:
         sys.stdout.write(json.dumps({"type": "error", "error": msg}) + "\n")
         sys.stdout.flush()
         return 1
 
-    if not args.agent:
-        return fail("no agent spec (set DEEPAGENT_AGENT_SPEC or pass --agent)")
+    spec = cfg.agent_spec
+    if args.demo:
+        if args.agent:
+            return fail("--demo and --agent are mutually exclusive")
+        spec = DEMO_AGENT_SPEC
+    if not spec:
+        return fail(
+            "no agent spec (pass --agent or --demo, set DEEPAGENT_AGENT_SPEC, "
+            "or set [agent].spec in deepagents.toml)"
+        )
 
-    os.environ.setdefault("DEEPAGENT_WORKSPACE_ROOT", args.workspace)
+    os.environ.setdefault("DEEPAGENT_WORKSPACE_ROOT", str(cfg.workspace_root))
     try:
-        graph = load_agent_spec(args.agent)
+        graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001
-        return fail(f"failed to load agent {args.agent!r}: {type(exc).__name__}: {exc}")
+        return fail(f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}")
 
     run(graph, sys.stdin, sys.stdout)
     return 0

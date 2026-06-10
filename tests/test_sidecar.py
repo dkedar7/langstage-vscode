@@ -6,7 +6,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from deepagent_vscode.sidecar import run
+from deepagent_vscode.sidecar import main, run
 
 
 # ── Fakes / fixtures ─────────────────────────────────────────────────
@@ -115,6 +115,72 @@ def test_invalid_json_reported():
     run(FakeGraph([]), stdin, stdout, stream_mode="updates")
     events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
     assert any(e["type"] == "error" and "invalid JSON" in e["error"] for e in events)
+
+
+# ── main(): config resolution + --demo / --show-config ───────────────
+
+
+def _isolate_config(monkeypatch, tmp_path):
+    """Point cwd + the global config home at an empty tmp dir and strip
+    DEEPAGENT_* env so main() resolves from pure defaults."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPAGENTS_CONFIG_HOME", str(tmp_path))
+    for var in ("DEEPAGENT_AGENT_SPEC", "DEEPAGENT_WORKSPACE_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_main_show_config(monkeypatch, tmp_path, capsys):
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--show-config"]) == 0
+    assert "DEEPAGENT_AGENT_SPEC" in capsys.readouterr().out
+
+
+def test_main_no_spec_emits_error(monkeypatch, tmp_path, capsys):
+    _isolate_config(monkeypatch, tmp_path)
+    assert main([]) == 1
+    err = json.loads(capsys.readouterr().out.strip())
+    assert err["type"] == "error"
+    assert "deepagents.toml" in err["error"]
+
+
+def test_main_demo_conflicts_with_agent(monkeypatch, tmp_path, capsys):
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--agent", "x.py:g"]) == 1
+    err = json.loads(capsys.readouterr().out.strip())
+    assert "mutually exclusive" in err["error"]
+
+
+def test_main_toml_supplies_agent_spec(monkeypatch, tmp_path, capsys):
+    """The deepagents.toml resolver is actually wired in: [agent].spec from a
+    project file reaches load_agent_spec with no flags or env."""
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "deepagents.toml").write_text(
+        '[agent]\nspec = "langgraph_stream_parser.demo.stub:graph"\n'
+    )
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n")
+    )
+    assert main([]) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert events[0] == {"type": "ready"}
+
+
+def test_main_demo_end_to_end(monkeypatch, tmp_path, capsys):
+    """--demo answers a real message turn through the stub agent — no keys."""
+    _isolate_config(monkeypatch, tmp_path)
+    commands = (
+        json.dumps({"type": "message", "session_id": "s", "content": "hi demo"})
+        + "\n"
+        + json.dumps({"type": "shutdown"})
+        + "\n"
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(commands))
+    assert main(["--demo"]) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    types = [e["type"] for e in events]
+    assert "ready" in types and "complete" in types and "turn_end" in types
+    content = "".join(e.get("content", "") for e in events if e["type"] == "content")
+    assert "hi demo" in content
 
 
 def test_unknown_command_reported():

@@ -26,7 +26,7 @@
         "deepagent.agentSpec": {
           "type": "string",
           "default": "",
-          "description": "Agent spec 'path/to/agent.py:graph' or 'module:graph' to run."
+          "description": "Agent spec 'path/to/agent.py:graph' or 'module:graph' to run. Leave empty to fall back to DEEPAGENT_AGENT_SPEC or the project's deepagents.toml."
         },
         "deepagent.pythonPath": {
           "type": "string",
