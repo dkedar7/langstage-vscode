@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # The langstage 0.11.1-style guard: install the Python sidecar as a real user
+  # would (no extras) on a clean interpreter, then import. Catches undeclared
+  # runtime dependencies.
+  minimal-install:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v3
+      - name: Install (no extras — as a real user would)
+        run: uv pip install --system .
+      - name: Import smoke
+        run: |
+          python -c "import langstage_vscode; print('langstage_vscode', langstage_vscode.__version__)"
+          python -c "import langstage_vscode.sidecar"
+          python -c "import deepagent_vscode"   # deprecated alias still resolves
+          python -m langstage_vscode --show-config
+
+  # Full Python test run with dev extras.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v3
+      - run: uv pip install --system -e ".[dev]"
+      - run: pytest -ra
+
+  # Clean build of the TypeScript VS Code extension.
+  extension-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run compile
