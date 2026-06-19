@@ -156,6 +156,15 @@ python -m langstage_vscode --demo
 {"type": "turn_end", "session_id": "s1"}
 ```
 
+> **`session_id` and conversational memory.** The sidecar maps each
+> `session_id` to a LangGraph `thread_id` in the run config. Multi-turn memory
+> across messages with the same `session_id` therefore only works if your agent
+> was **compiled with a checkpointer** (e.g. `graph.compile(checkpointer=...)`,
+> or `create_deep_agent(..., checkpointer=...)`). A plain `create_react_agent`
+> graph with no checkpointer is stateless: the second turn won't remember the
+> first, even with a matching `session_id`. This is expected LangGraph
+> behavior, not a sidecar bug.
+
 ## Development
 
 ```bash

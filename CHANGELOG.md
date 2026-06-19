@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-06-19
+
+### Fixed
+- `langstage_vscode.__version__` was a hard-coded `"0.1.0"` and had drifted (the
+  package was at 0.4.0). Since it's an exported public attribute (`__all__`), any
+  consumer trusting it got the wrong answer. It now derives from the installed
+  distribution metadata (`importlib.metadata.version`), so it always matches
+  `pyproject.toml` and can't drift again. (gh #9)
+
+### Docs
+- Document that `session_id` ↔ `thread_id` multi-turn memory only works when the
+  agent was compiled with a checkpointer; a plain `create_react_agent` is
+  stateless across turns. (gh #9, adopter observation)
+
 ## [0.4.0] - 2026-06-14
 
 Adopt AG-UI: widen the langgraph-stream-parser ceiling to <0.5 and add an [agui] extra so this surface's agent can be served over AG-UI via langstage-agui. Additive; no runtime changes.
