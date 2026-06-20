@@ -63,6 +63,30 @@ def test_ready_is_first_event():
     assert events[0] == {"type": "ready"}
 
 
+def test_dual_mode_finished_aimessage_emits_content():
+    """Regression (gh #-dogfood): the sidecar runs dual stream_mode
+    ["updates","messages"], and a CompiledGraph whose node returns a finished
+    AIMessage with no token stream used to render an EMPTY turn (content was
+    suppressed). With langgraph-stream-parser>=0.6.4 it emits a content frame.
+
+    The existing tests drive single 'updates' mode, where content was never
+    suppressed — which is exactly why this bug slipped past them.
+    """
+    # Dual-mode chunk: an updates message with NO preceding messages tokens.
+    dual_chunk = ("updates", {"respond": {"messages": [AIMessage(content="hi there", id="m1")]}})
+    graph = FakeGraph([[dual_chunk]])
+    stdin = io.StringIO(
+        json.dumps({"type": "message", "session_id": "s", "content": "hello"}) + "\n"
+        + json.dumps({"type": "shutdown"}) + "\n"
+    )
+    stdout = io.StringIO()
+    run(graph, stdin, stdout, stream_mode=["updates", "messages"])
+    events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+    content = [e for e in events if e["type"] == "content"]
+    assert content, f"no content frame emitted; got {[e['type'] for e in events]}"
+    assert content[0]["content"] == "hi there"
+
+
 def test_message_turn_emits_content_and_terminals():
     graph = FakeGraph([[CONTENT]])
     events = drive(graph, [

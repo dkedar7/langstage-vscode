@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.2] - 2026-06-20
+
+### Fixed
+- **Custom agents that return a finished `AIMessage` rendered an empty chat turn
+  (gh #-dogfood).** The sidecar runs dual `stream_mode=["updates","messages"]`,
+  where content used to come only from token streaming — so a `CompiledGraph`
+  whose node returns a prebuilt `AIMessage` (rule-based / router / retrieval, or
+  any non-token-streaming LLM call) produced no content frame. Modernized the
+  `langgraph-stream-parser` pin from the stale `<0.5` to `>=0.6.4,<0.7`, which
+  emits such content as a fallback. Verified end to end over NDJSON.
+
+### Docs
+- The protocol-section keyless `--demo` example now notes it needs the `[demo]`
+  extra (`pip install "langstage-vscode[demo]"`); a base install ships only the
+  sidecar, and `--demo`'s stub agent needs langgraph.
+
 ## [0.4.1] - 2026-06-19
 
 ### Fixed

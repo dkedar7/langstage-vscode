@@ -130,7 +130,9 @@ directly for testing:
 ```bash
 LANGSTAGE_AGENT_SPEC=./my_agent.py:graph python -m langstage_vscode
 
-# or with no agent and no API key at all:
+# or with no agent and no API key at all — needs the [demo] extra
+# (a base install ships only the sidecar; --demo's stub agent needs langgraph):
+#   pip install "langstage-vscode[demo]"
 python -m langstage_vscode --demo
 ```
 
