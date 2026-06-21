@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.3] - 2026-06-21
+
+### Fixed
+- **`tool_end` reported `name="unknown"`** even though `tool_start` (same id)
+  carried the tool name. Fixed upstream in `langgraph-stream-parser` 0.6.7; bumped
+  the core pin to `>=0.6.7,<0.7` (base + `[agui]`) to deliver it.
+- **`--help` em-dash mojibaked on a default Windows (cp1252) console.** Replaced
+  the non-ASCII em-dash in the `--demo` help with ASCII so `--help` renders cleanly.
+
+### Added
+- **`--version`** flag on the sidecar (`langstage-vscode-sidecar --version`),
+  mirroring `langstage-agui` — it previously errored with `unrecognized arguments`.
+
 ## [0.4.2] - 2026-06-20
 
 ### Fixed

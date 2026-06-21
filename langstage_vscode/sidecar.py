@@ -140,12 +140,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="Run with the built-in keyless demo agent — no API key needed.",
+        help="Run with the built-in keyless demo agent (no API key needed).",
     )
     parser.add_argument(
         "--show-config",
         action="store_true",
         help="Print the resolved configuration (defaults < langstage.toml < env < CLI) and exit.",
+    )
+    from langstage_vscode import __version__
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"langstage-vscode-sidecar {__version__}",
+        help="Print the version and exit.",
     )
     args = parser.parse_args(argv)
 
