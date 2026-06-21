@@ -58,6 +58,29 @@ def drive(graph, commands, **kw):
 # ── Tests ────────────────────────────────────────────────────────────
 
 
+def test_version_flag(capsys):
+    """--version prints the sidecar version and exits 0 (gh #-dogfood)."""
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "langstage-vscode-sidecar" in out
+
+
+def test_help_output_is_ascii(capsys):
+    """--help output must be ASCII — an em-dash in a help string mojibakes on a
+    cp1252 console (gh #-dogfood)."""
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert "--demo" in out
+    assert out.isascii(), "sidecar --help must be ASCII-safe"
+
+
 def test_ready_is_first_event():
     events = drive(FakeGraph([]), [{"type": "shutdown"}])
     assert events[0] == {"type": "ready"}

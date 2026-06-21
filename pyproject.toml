@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.4.2"
+version = "0.4.3"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 license = "MIT"
 requires-python = ">=3.11"
@@ -16,12 +16,12 @@ dependencies = [
     # >=0.6.4 modernizes off the stale <0.5 pin and carries the dual-mode content
     # fallback, so a CompiledGraph returning a finished AIMessage (non-token-
     # streaming agents) renders content instead of an empty chat turn (gh #-dogfood).
-    "langgraph-stream-parser>=0.6.4,<0.7",
+    "langgraph-stream-parser>=0.6.7,<0.7",
 ]
 
 [project.optional-dependencies]
 agui = [
-    "langgraph-stream-parser[agui]>=0.6.4,<0.7",
+    "langgraph-stream-parser[agui]>=0.6.7,<0.7",
 ]
 demo = [
     "deepagents>=0.3",
