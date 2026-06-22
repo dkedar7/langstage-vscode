@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-label="deepagent-vscode — chat with your LangGraph and deepagents agent inside VS Code">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-label="langstage-vscode — chat with your LangGraph and deepagents agent inside VS Code">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0B1221"/>
@@ -23,15 +23,15 @@
   <rect x="1" y="1" width="1278" height="338" rx="19" fill="none" stroke="#21314A" stroke-width="1.5"/>
 
   <!-- ===== left: identity ===== -->
-  <!-- @deepagent pill -->
+  <!-- @langstage pill -->
   <g transform="translate(72,66)">
     <rect width="158" height="34" rx="17" fill="#0F2C3A" stroke="url(#accent)" stroke-width="1.5"/>
     <circle cx="22" cy="17" r="5" fill="url(#accent)"/>
-    <text x="40" y="23" font-family="'SF Mono','JetBrains Mono','Consolas',monospace" font-size="16" fill="#9FE9DF">@deepagent</text>
+    <text x="40" y="23" font-family="'SF Mono','JetBrains Mono','Consolas',monospace" font-size="16" fill="#9FE9DF">@langstage</text>
   </g>
 
   <!-- title -->
-  <text x="70" y="178" font-family="'SF Mono','JetBrains Mono','Consolas',monospace" font-size="62" font-weight="700" fill="#F2F6FC" letter-spacing="-1">deepagent<tspan fill="url(#accent)">-vscode</tspan></text>
+  <text x="70" y="178" font-family="'SF Mono','JetBrains Mono','Consolas',monospace" font-size="62" font-weight="700" fill="#F2F6FC" letter-spacing="-1">langstage<tspan fill="url(#accent)">-vscode</tspan></text>
 
   <!-- tagline -->
   <text x="72" y="224" font-family="'Segoe UI',Helvetica,Arial,sans-serif" font-size="22" fill="#9DB2C8">Chat with your LangGraph &#183; deepagents agent</text>
@@ -63,10 +63,10 @@
       <text x="16" y="22" font-family="'Segoe UI',Arial,sans-serif" font-size="13" fill="#C7D6E6">fix the failing test</text>
     </g>
 
-    <!-- assistant: @deepagent -->
+    <!-- assistant: @langstage -->
     <g transform="translate(20,108)">
       <circle cx="9" cy="9" r="8" fill="url(#accent)"/>
-      <text x="28" y="13" font-family="'SF Mono','Consolas',monospace" font-size="13" fill="#9FE9DF">@deepagent</text>
+      <text x="28" y="13" font-family="'SF Mono','Consolas',monospace" font-size="13" fill="#9FE9DF">@langstage</text>
       <rect x="0" y="28" width="300" height="9" rx="4.5" fill="#27425C"/>
       <rect x="0" y="46" width="356" height="9" rx="4.5" fill="#27425C"/>
       <rect x="0" y="64" width="210" height="9" rx="4.5" fill="#27425C"/>
