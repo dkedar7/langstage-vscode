@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.4] - 2026-06-22
+
+### Fixed
+- **`--demo` was needlessly heavy and errored misleadingly on a base install.**
+  The `[demo]` extra pulled the entire `deepagents` ML stack (~30 packages incl.
+  `anthropic`/`google-genai`) just to obtain `langgraph` — but the demo agent is
+  the keyless echo stub, which needs only `langgraph`. `[demo]` now pulls core's
+  lightweight `langgraph-stream-parser[stub]` extra instead (verified: a clean
+  `pip install "langstage-vscode[demo]"` installs `langgraph` with **no**
+  `deepagents`, and the stub agent loads). And the base core floor is now
+  `>=0.6.10`, so a base-install `--demo` (without the extra) gets core's honest
+  "install the [stub] extra" error instead of the old false "every deep-agent
+  surface already installs them" message. (Found by the dogfood routine.)
+
 ## [0.4.3] - 2026-06-21
 
 ### Fixed
