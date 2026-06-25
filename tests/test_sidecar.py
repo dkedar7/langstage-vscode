@@ -182,6 +182,21 @@ def test_main_show_config(monkeypatch, tmp_path, capsys):
     assert "LANGSTAGE_AGENT_SPEC" in capsys.readouterr().out
 
 
+def test_main_show_config_omits_inert_server_keys(monkeypatch, tmp_path, capsys):
+    # The stdio sidecar never opens a socket or renders a UI, so host/port/debug/
+    # title do nothing — --show-config must not advertise them. (gh #14)
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_PORT", "12345")
+    monkeypatch.setenv("LANGSTAGE_HOST", "0.0.0.0")
+    assert main(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    for inert in ("LANGSTAGE_PORT", "LANGSTAGE_HOST", "LANGSTAGE_DEBUG", "LANGSTAGE_TITLE"):
+        assert inert not in out
+    assert "\n  port " not in out and "\n  host " not in out
+    # ...but the keys the sidecar honors are still shown.
+    assert "agent_spec" in out and "workspace_root" in out
+
+
 def test_main_no_spec_emits_error(monkeypatch, tmp_path, capsys):
     _isolate_config(monkeypatch, tmp_path)
     assert main([]) == 1

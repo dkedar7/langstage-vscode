@@ -164,7 +164,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.show_config:
-        print(cfg.describe())
+        # This is a pure stdio sidecar — it never opens a socket or renders a
+        # UI, so the inherited host/port/debug/title keys do nothing here.
+        # Hide them so --show-config only advertises what the sidecar honors
+        # (agent_spec, workspace_root). (gh #14)
+        print(cfg.describe(omit_keys=["host", "port", "debug", "title"]))
         return 0
 
     def fail(msg: str) -> int:
