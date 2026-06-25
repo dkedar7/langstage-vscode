@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.5] - 2026-06-25
+
+### Fixed
+- **`--show-config` advertised inert server/UI keys on the stdio sidecar.** It
+  listed `host`, `port`, `debug`, and `title` (inherited from the shared
+  `HostConfig`) with full `LANGSTAGE_*` / TOML source attribution — but this
+  surface is a pure stdio sidecar that never opens a socket or renders a UI, so
+  those four do nothing. `--show-config` now shows only the keys the sidecar
+  honors (`agent_spec`, `workspace_root`), via core's new
+  `describe(omit_keys=…)` (bumps the core floor to `>=0.6.11`). (Found by the
+  dogfood routine, gh #14.)
+
 ## [0.4.4] - 2026-06-22
 
 ### Fixed
