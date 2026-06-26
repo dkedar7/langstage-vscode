@@ -154,9 +154,18 @@ python -m langstage_vscode --demo
 {"type": "tool_start", "name": "...", ...} // tool call
 {"type": "tool_end", "name": "...", ...}   // tool result
 {"type": "interrupt", "action_requests": [...]}  // human-in-the-loop
-{"type": "complete"}                       // turn finished
+{"type": "complete"}                       // turn finished (success)
+{"type": "error", "error": "..."}          // protocol error (bad/unknown command)
+                                           // OR an exception raised by the agent.
+                                           // On agent failure the turn emits this
+                                           // INSTEAD of "complete", then "turn_end".
 {"type": "turn_end", "session_id": "s1"}
 ```
+
+> A client must handle `error`: a malformed/unknown command, a `message` with no
+> `content`, an invalid `decision`, **and** an agent crashing mid-turn all emit an
+> `error` frame. On the agent-failure path there is no `complete` — the sequence
+> is `ack → error → turn_end` — so don't key turn-completion off `complete` alone.
 
 > **`session_id` and conversational memory.** The sidecar maps each
 > `session_id` to a LangGraph `thread_id` in the run config. Multi-turn memory
