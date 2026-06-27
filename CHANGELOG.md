@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.6] - 2026-06-27
+
+### Fixed
+- **The legacy `deepagent_vscode` alias dropped the old package's public API.**
+  The rename promised "existing imports keep working," but the alias re-exported
+  only the `sidecar` submodule — so `from deepagent_vscode import main, run` and
+  `deepagent_vscode.__version__` (all in the old package's `__all__`) raised
+  `ImportError`/`AttributeError`. The alias now re-exports `main`, `run`, and
+  `__version__` from `langstage_vscode` (with `__version__` deriving from
+  installed metadata, per #9), so old programmatic consumers keep working through
+  the transition window. (Found by the dogfood routine, gh #17.)
+
 ## [0.4.5] - 2026-06-25
 
 ### Fixed

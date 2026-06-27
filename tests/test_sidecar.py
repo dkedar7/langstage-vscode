@@ -256,6 +256,25 @@ def test_legacy_module_import_warns():
     assert old_sidecar is new_sidecar
 
 
+def test_legacy_alias_exposes_full_public_api():
+    # gh #17: the alias must re-export the old package's public API
+    # (main, run, __version__) — not only the sidecar submodule.
+    import sys
+    import warnings
+
+    sys.modules.pop("deepagent_vscode", None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import deepagent_vscode as alias
+    import langstage_vscode as canonical
+
+    assert alias.main is canonical.main
+    assert alias.run is canonical.run
+    assert alias.__version__ == canonical.__version__
+    for name in ("main", "run", "sidecar", "__version__"):
+        assert hasattr(alias, name), name
+
+
 def test_main_demo_end_to_end(monkeypatch, tmp_path, capsys):
     """--demo answers a real message turn through the stub agent — no keys."""
     _isolate_config(monkeypatch, tmp_path)
