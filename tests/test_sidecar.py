@@ -323,3 +323,44 @@ def test_graph_error_surfaced():
     ])
     err = [e for e in events if e["type"] == "error"]
     assert err and "kaboom" in err[-1]["error"]
+
+
+# ── gh #19: --workspace override must reach the agent (os.environ), not just --show-config ──
+
+
+def test_workspace_override_reaches_agent_env(monkeypatch, tmp_path):
+    """The agent reads LANGSTAGE_WORKSPACE_ROOT from os.environ. setdefault() was a
+    no-op when the env var was already exported, so a --workspace override was
+    silently dropped (agent saw the stale env value) even though --show-config
+    reported the override as winning. (gh #19)"""
+    import os
+    from pathlib import Path
+
+    _isolate_config(monkeypatch, tmp_path)
+    env_dir = tmp_path / "env"; env_dir.mkdir()
+    cli_dir = tmp_path / "cli"; cli_dir.mkdir()
+    monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(env_dir))  # preset env
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n"))
+
+    rc = main(["--agent", "langgraph_stream_parser.demo.stub:graph", "--workspace", str(cli_dir)])
+    assert rc == 0
+    seen = Path(os.environ["LANGSTAGE_WORKSPACE_ROOT"]).resolve()
+    assert seen == cli_dir.resolve(), f"override dropped: agent would read {seen}"
+    assert seen != env_dir.resolve()
+    # legacy name is kept in sync, not left stale
+    assert Path(os.environ["DEEPAGENT_WORKSPACE_ROOT"]).resolve() == cli_dir.resolve()
+
+
+def test_no_override_keeps_env_workspace(monkeypatch, tmp_path):
+    """Regression: with no --workspace flag, the exported env value still wins."""
+    import os
+    from pathlib import Path
+
+    _isolate_config(monkeypatch, tmp_path)
+    env_dir = tmp_path / "env"; env_dir.mkdir()
+    monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(env_dir))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n"))
+
+    rc = main(["--agent", "langgraph_stream_parser.demo.stub:graph"])
+    assert rc == 0
+    assert Path(os.environ["LANGSTAGE_WORKSPACE_ROOT"]).resolve() == env_dir.resolve()
