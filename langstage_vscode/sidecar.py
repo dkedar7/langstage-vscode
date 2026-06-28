@@ -187,7 +187,15 @@ def main(argv: list[str] | None = None) -> int:
             "or set [agent].spec in langstage.toml)"
         )
 
-    os.environ.setdefault("LANGSTAGE_WORKSPACE_ROOT", str(cfg.workspace_root))
+    # Hand the RESOLVED workspace to the agent. cfg.workspace_root already applied
+    # precedence (CLI --workspace > env > toml), so it is authoritative — assign it,
+    # don't setdefault. setdefault was a no-op when LANGSTAGE_WORKSPACE_ROOT was
+    # already exported, so the agent read the stale env value while --show-config
+    # reported the --workspace override as winning. Keep the legacy name in sync so
+    # an agent reading the deprecated var doesn't get a stale directory. (gh #19)
+    resolved_root = str(cfg.workspace_root)
+    os.environ["LANGSTAGE_WORKSPACE_ROOT"] = resolved_root
+    os.environ["DEEPAGENT_WORKSPACE_ROOT"] = resolved_root
     try:
         graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001
