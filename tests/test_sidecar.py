@@ -337,8 +337,10 @@ def test_workspace_override_reaches_agent_env(monkeypatch, tmp_path):
     from pathlib import Path
 
     _isolate_config(monkeypatch, tmp_path)
-    env_dir = tmp_path / "env"; env_dir.mkdir()
-    cli_dir = tmp_path / "cli"; cli_dir.mkdir()
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    cli_dir = tmp_path / "cli"
+    cli_dir.mkdir()
     monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(env_dir))  # preset env
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n"))
 
@@ -357,10 +359,48 @@ def test_no_override_keeps_env_workspace(monkeypatch, tmp_path):
     from pathlib import Path
 
     _isolate_config(monkeypatch, tmp_path)
-    env_dir = tmp_path / "env"; env_dir.mkdir()
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
     monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(env_dir))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n"))
 
     rc = main(["--agent", "langgraph_stream_parser.demo.stub:graph"])
     assert rc == 0
     assert Path(os.environ["LANGSTAGE_WORKSPACE_ROOT"]).resolve() == env_dir.resolve()
+
+
+# ── gh #21: --selfcheck / --smoke preflight ──────────────────────────────────
+
+
+def test_selfcheck_demo_is_healthy(monkeypatch, tmp_path, capsys):
+    """--selfcheck with no agent validates the runtime via the demo stub."""
+    _isolate_config(monkeypatch, tmp_path)
+    rc = main(["--selfcheck"])
+    assert rc == 0
+    assert capsys.readouterr().err.startswith("OK:")
+
+
+def test_selfcheck_non_runnable_agent_fails_precisely(monkeypatch, tmp_path, capsys):
+    """A spec that loads but isn't a CompiledGraph fails with a precise message,
+    not a cryptic first-message AttributeError."""
+    _isolate_config(monkeypatch, tmp_path)
+    rc = main(["--selfcheck", "--agent", "os:getcwd"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not a runnable graph" in err
+    assert "builtin_function_or_method" in err  # names what it actually loaded
+
+
+def test_selfcheck_unloadable_agent_fails(monkeypatch, tmp_path, capsys):
+    _isolate_config(monkeypatch, tmp_path)
+    rc = main(["--selfcheck", "--agent", "no_such_module:graph"])
+    assert rc == 1
+    assert "failed to load" in capsys.readouterr().err
+
+
+def test_selfcheck_json_verdict(monkeypatch, tmp_path, capsys):
+    _isolate_config(monkeypatch, tmp_path)
+    rc = main(["--smoke", "--json"])  # --smoke alias
+    assert rc == 0
+    verdict = json.loads(capsys.readouterr().out.strip())
+    assert verdict["type"] == "selfcheck" and verdict["ok"] is True

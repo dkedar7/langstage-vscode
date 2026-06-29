@@ -102,6 +102,16 @@ flags** — so a project with `[agent] spec = "my_agent.py:graph"` in its
 langstage-vscode-sidecar --show-config
 ```
 
+Preflight the interpreter and your agent before wiring up chat — `--selfcheck`
+(alias `--smoke`) loads the configured agent (or the demo stub), asserts it's a
+runnable graph, drives one turn, and exits `0` (healthy) / non-zero with a precise
+message (add `--json` for a machine-readable verdict):
+
+```bash
+langstage-vscode-sidecar --selfcheck                       # validate the runtime via the demo stub
+langstage-vscode-sidecar --selfcheck --agent ./my.py:graph # validate the configured agent
+```
+
 Your agent is any LangGraph `CompiledGraph` (e.g. from `deepagents`), exported
 under the name in the spec:
 
