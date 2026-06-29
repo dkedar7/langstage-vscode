@@ -118,6 +118,78 @@ def _run_turn(
 DEMO_AGENT_SPEC = "langgraph_stream_parser.demo.stub:graph"
 
 
+def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
+    """Preflight the spawned interpreter + agent spec, then exit 0/non-zero.
+
+    Answers the question the VS Code extension needs before wiring up the chat
+    participant: does this interpreter have a working sidecar, and does the
+    configured spec load into a *runnable* graph? Several misconfigs — most
+    sharply a spec that points at a factory/module rather than the compiled
+    graph — otherwise stay invisible until the first ``@langstage`` message, where
+    they surface as a cryptic ``'...' object has no attribute 'stream'``. (gh #21)
+    """
+    import os
+    import sys
+
+    from langstage_vscode import __version__
+
+    # Hand the agent the resolved workspace, same as the real run path.
+    resolved_root = str(cfg.workspace_root)
+    os.environ["LANGSTAGE_WORKSPACE_ROOT"] = resolved_root
+    os.environ["DEEPAGENT_WORKSPACE_ROOT"] = resolved_root
+
+    def verdict(ok: bool, msg: str) -> int:
+        if as_json:
+            sys.stdout.write(
+                json.dumps({"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}) + "\n"
+            )
+            sys.stdout.flush()
+        else:
+            sys.stderr.write(("OK: " if ok else "FAIL: ") + msg + "\n")
+        return 0 if ok else 1
+
+    # 1. The spec must import.
+    try:
+        graph = load_agent_spec(spec)
+    except Exception as exc:  # noqa: BLE001 — reported as the verdict
+        return verdict(False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}")
+
+    # 2. Runnable check — the sharp case: it loaded, but it isn't a CompiledGraph.
+    # Name the spec and what it actually loaded instead of deferring to a
+    # first-message AttributeError.
+    if not callable(getattr(graph, "stream", None)):
+        return verdict(
+            False,
+            f"agent spec {spec!r} loaded a `{type(graph).__name__}`, not a runnable graph "
+            "(no `.stream`). Point the spec at the compiled graph attribute, e.g. `module:graph`.",
+        )
+
+    # 3. Drive one real turn through the actual command loop and assert the
+    # documented terminal sequence (ready -> ack -> content... -> complete ->
+    # turn_end), with no error frame.
+    import io
+
+    commands = [
+        json.dumps({"type": "message", "content": "selfcheck ping"}),
+        json.dumps({"type": "shutdown"}),
+    ]
+    out = io.StringIO()
+    run(graph, iter(commands), out)
+    frames = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    types = [f.get("type") for f in frames]
+
+    if "error" in types:
+        err = next(f.get("error") for f in frames if f.get("type") == "error")
+        return verdict(False, f"agent spec {spec!r} errored driving a turn: {err}")
+    if "complete" not in types or "turn_end" not in types:
+        return verdict(False, f"agent spec {spec!r} did not complete a turn (frames: {types})")
+
+    return verdict(
+        True,
+        f"langstage-vscode {__version__} - {spec} drove a turn; interpreter has a working sidecar.",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import os
@@ -146,6 +218,19 @@ def main(argv: list[str] | None = None) -> int:
         "--show-config",
         action="store_true",
         help="Print the resolved configuration (defaults < langstage.toml < env < CLI) and exit.",
+    )
+    parser.add_argument(
+        "--selfcheck",
+        "--smoke",
+        action="store_true",
+        dest="selfcheck",
+        help="Preflight: load the configured agent (or the demo stub), assert it is a runnable "
+        "graph, drive one turn, and exit 0 (healthy) / non-zero. Does not enter the command loop.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --selfcheck, emit a machine-readable JSON verdict instead of a human-readable line.",
     )
     from langstage_vscode import __version__
 
@@ -181,6 +266,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.agent:
             return fail("--demo and --agent are mutually exclusive")
         spec = DEMO_AGENT_SPEC
+
+    if args.selfcheck:
+        # With no agent configured, validate the runtime itself via the demo stub.
+        return _selfcheck(spec or DEMO_AGENT_SPEC, cfg, as_json=args.json)
+
     if not spec:
         return fail(
             "no agent spec (pass --agent or --demo, set LANGSTAGE_AGENT_SPEC, "
