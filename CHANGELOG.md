@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.8] - 2026-06-29
+
+### Added
+- **`--selfcheck` (alias `--smoke`): preflight the spawned interpreter + agent
+  spec before the first chat message.** Loads the configured agent (or the demo
+  stub) and asserts it's a runnable graph — failing with a precise message that
+  names the spec and what it actually loaded, instead of a cryptic first-message
+  `'...' object has no attribute 'stream'` — then drives one real turn and exits
+  0/non-zero. `--json` emits a machine-readable verdict for the extension to
+  consume. (Found by the dogfood routine, gh #21.)
+
+## [0.4.7] - 2026-06-28
+
+### Fixed
+- **The `--workspace` override never reached the agent.** The sidecar handed the
+  workspace to the agent via `os.environ.setdefault`, a no-op when
+  `LANGSTAGE_WORKSPACE_ROOT` was already exported — so `--workspace` was silently
+  dropped (the agent read the stale env value) even though `--show-config`
+  reported the override as winning. It now assigns the resolved value
+  unconditionally. (Found by the dogfood routine, gh #19.)
+
 ## [0.4.6] - 2026-06-27
 
 ### Fixed
