@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.9] - 2026-07-01
+
+### Added
+- **Experimental `--agui` sidecar path (ADR 0002).** The sidecar can stream
+  through the official in-process `ag-ui-langgraph` adapter instead of the
+  built-in event parser, opt-in via `--agui` or `LANGSTAGE_VSCODE_AGUI=1`. It
+  emits the **same `event_to_dict` JSON frames** (`content`/`tool_start`/
+  `tool_end`/`interrupt`/`complete`/`error`), so the TS extension's dispatcher is
+  **unchanged**. Text, tool calls/results, and interrupts (display + resume via
+  the adapter's `forwarded_props.command.resume`) all reach frame parity with the
+  default path. Requires the `agui` extra: `pip install "langstage-vscode[agui]"`.
+  The default path is untouched. Third surface of the family's AG-UI migration
+  (after `langstage-cli` and `langstage-jupyter`).
+
 ## [0.4.8] - 2026-06-29
 
 ### Added
