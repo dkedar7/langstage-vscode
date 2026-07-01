@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.4.9"
+version = "0.4.10"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 license = "MIT"
 requires-python = ">=3.11"
@@ -19,12 +19,12 @@ dependencies = [
     # >=0.6.11 carries describe(omit_keys=...) (so --show-config can hide the
     # inherited server/ui keys this stdio sidecar doesn't honor), the honest stub
     # missing-deps error, and the full LANGSTAGE_SUPPRESS_LEGACY_NOTICE opt-out.
-    "langgraph-stream-parser>=0.6.11,<0.7",
+    "langgraph-stream-parser>=0.6.16,<0.7",
 ]
 
 [project.optional-dependencies]
 agui = [
-    "langgraph-stream-parser[agui]>=0.6.11,<0.7",
+    "langgraph-stream-parser[agui]>=0.6.16,<0.7",
 ]
 demo = [
     # The `--demo` agent is the keyless echo stub (langgraph_stream_parser.demo.stub),

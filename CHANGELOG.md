@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.10] - 2026-07-01
+
+### Changed
+- **Internal dedupe (ADR 0002):** the `--agui` path's AG-UI→`event_to_dict`
+  mapping now delegates to the core's `langgraph_stream_parser.agui.iter_event_frames`
+  (0.6.16), shared with the web `SessionAdapter`, instead of carrying its own copy.
+  Behavior is unchanged (same frames; tests still pass) — the mapping just has a
+  single source of truth so rendering fixes land once. Core floor → `>=0.6.16`.
+
 ## [0.4.9] - 2026-07-01
 
 ### Added
