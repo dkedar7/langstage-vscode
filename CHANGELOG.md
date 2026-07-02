@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-07-02
+
+### Changed
+- **AG-UI is now the sidecar's only streaming path (ADR 0003).** The built-in
+  `StreamParser` path is gone; every turn streams through `langstage-core`'s
+  in-process AG-UI adapter, emitting the exact same `event_to_dict`-shaped frames
+  the TS extension already renders — so the wire and the extension are unchanged.
+  The `--agui` flag and `LANGSTAGE_VSCODE_AGUI` env are removed (they toggled a
+  path that no longer exists); both are accepted-and-ignored for one release so
+  existing launch configs don't break.
+- **Repointed to `langstage-core` 1.0** (the rename of `langgraph-stream-parser`;
+  ADR 0003). The AG-UI runtime (`ag-ui-langgraph[fastapi]` + uvicorn, via core's
+  `[agui]` extra) moved into **base dependencies**: since AG-UI is the only path,
+  a bare `pip install langstage-vscode` must be able to run a turn. The `[agui]`
+  extra is now a redundant no-op alias, kept so existing install commands resolve.
+
+### Removed
+- `StreamParser`/`event_to_dict` imports, the `_run_turn` parser turn function,
+  and the `--agui`/env branching in `run()` and `main()`. The command/event loop,
+  frame vocabulary, `--demo`, `--selfcheck`, and `--show-config` are unchanged.
+
 ## [0.4.10] - 2026-07-01
 
 ### Changed
