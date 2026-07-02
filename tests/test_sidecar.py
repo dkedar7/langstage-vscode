@@ -1,57 +1,47 @@
-"""Tests for the stdio sidecar command/event loop."""
+"""Tests for the stdio sidecar command/event loop.
+
+Since core 1.0 (ADR 0003) the sidecar streams turns ONLY through the in-process
+AG-UI adapter, which drives a real compiled LangGraph agent — so these use real
+graphs (the demo stub, or small compiled graphs), not a hand-rolled fake. The
+streaming-frame behavior (content/tool/interrupt shapes) is covered in
+tests/test_agui_sidecar.py; this file covers the command loop, validation, and
+main()'s config resolution.
+"""
 import io
 import json
-from dataclasses import dataclass
-from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+
+from langstage_core import load_agent_spec
 
 from langstage_vscode.sidecar import main, run
 
 
-# ── Fakes / fixtures ─────────────────────────────────────────────────
+# ── Fixtures ─────────────────────────────────────────────────────────
 
 
-class FakeGraph:
-    """Sync LangGraph-ish fake yielding canned single-mode 'updates' chunks."""
-
-    def __init__(self, chunks_per_call: list[list[Any]]):
-        self._chunks = chunks_per_call
-        self._i = 0
-        self.calls: list[dict] = []
-
-    def stream(self, input_data, config=None, stream_mode="updates"):
-        self.calls.append({"input": input_data, "config": config, "stream_mode": stream_mode})
-        chunks = self._chunks[self._i]
-        self._i += 1
-        for c in chunks:
-            yield c
+def _stub():
+    """The keyless demo echo agent — a real CompiledGraph the AG-UI path accepts."""
+    return load_agent_spec("langstage_core.demo.stub:graph")
 
 
-@dataclass
-class MockInterrupt:
-    value: Any
-    resumable: bool = True
+def _boom_graph():
+    """A compiled graph whose only node raises, to exercise error surfacing."""
+    def boom(state):
+        raise RuntimeError("kaboom")
+
+    b = StateGraph(MessagesState)
+    b.add_node("boom", boom)
+    b.add_edge(START, "boom")
+    b.add_edge("boom", END)
+    return b.compile()
 
 
-CONTENT = {"agent": {"messages": [AIMessage(content="Hello there")]}}
-TOOLCALL = {"agent": {"messages": [AIMessage(
-    content="", tool_calls=[{"id": "c1", "name": "search", "args": {"q": "x"}}],
-)]}}
-TOOLRESULT = {"tools": {"messages": [ToolMessage(
-    content="result ok", name="search", tool_call_id="c1",
-)]}}
-INTERRUPT = {"__interrupt__": (MockInterrupt(value={
-    "action_requests": [{"name": "bash", "args": {"command": "ls"}, "tool_call_id": "c1"}],
-    "review_configs": [{"allowed_decisions": ["approve", "reject"]}],
-}),)}
-
-
-def drive(graph, commands, **kw):
+def drive(graph, commands):
     """Feed JSON commands through run() and return parsed event dicts."""
     stdin = io.StringIO("".join(json.dumps(c) + "\n" for c in commands))
     stdout = io.StringIO()
-    run(graph, stdin, stdout, stream_mode="updates", **kw)
+    run(graph, stdin, stdout)
     return [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
 
 
@@ -82,38 +72,13 @@ def test_help_output_is_ascii(capsys):
 
 
 def test_ready_is_first_event():
-    events = drive(FakeGraph([]), [{"type": "shutdown"}])
+    events = drive(_stub(), [{"type": "shutdown"}])
     assert events[0] == {"type": "ready"}
 
 
-def test_dual_mode_finished_aimessage_emits_content():
-    """Regression (gh #-dogfood): the sidecar runs dual stream_mode
-    ["updates","messages"], and a CompiledGraph whose node returns a finished
-    AIMessage with no token stream used to render an EMPTY turn (content was
-    suppressed). With langgraph-stream-parser>=0.6.4 it emits a content frame.
-
-    The existing tests drive single 'updates' mode, where content was never
-    suppressed — which is exactly why this bug slipped past them.
-    """
-    # Dual-mode chunk: an updates message with NO preceding messages tokens.
-    dual_chunk = ("updates", {"respond": {"messages": [AIMessage(content="hi there", id="m1")]}})
-    graph = FakeGraph([[dual_chunk]])
-    stdin = io.StringIO(
-        json.dumps({"type": "message", "session_id": "s", "content": "hello"}) + "\n"
-        + json.dumps({"type": "shutdown"}) + "\n"
-    )
-    stdout = io.StringIO()
-    run(graph, stdin, stdout, stream_mode=["updates", "messages"])
-    events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
-    content = [e for e in events if e["type"] == "content"]
-    assert content, f"no content frame emitted; got {[e['type'] for e in events]}"
-    assert content[0]["content"] == "hi there"
-
-
 def test_message_turn_emits_content_and_terminals():
-    graph = FakeGraph([[CONTENT]])
-    events = drive(graph, [
-        {"type": "message", "session_id": "s", "content": "hi"},
+    events = drive(_stub(), [
+        {"type": "message", "session_id": "s", "content": "hi there"},
         {"type": "shutdown"},
     ])
     types = [e["type"] for e in events]
@@ -122,46 +87,44 @@ def test_message_turn_emits_content_and_terminals():
     assert "content" in types
     assert "complete" in types
     assert any(e["type"] == "turn_end" and e["session_id"] == "s" for e in events)
-    # thread_id wired from session_id
-    assert graph.calls[0]["config"] == {"configurable": {"thread_id": "s"}}
-
-
-def test_tool_lifecycle():
-    graph = FakeGraph([[TOOLCALL, TOOLRESULT]])
-    events = drive(graph, [
-        {"type": "message", "session_id": "s", "content": "search"},
-        {"type": "shutdown"},
-    ])
-    types = [e["type"] for e in events]
-    assert "tool_start" in types
-    assert "tool_end" in types
-
-
-def test_interrupt_then_decision_resumes():
-    graph = FakeGraph([[TOOLCALL, INTERRUPT], [TOOLRESULT]])
-    events = drive(graph, [
-        {"type": "message", "session_id": "s", "content": "run it"},
-        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},
-        {"type": "shutdown"},
-    ])
-    types = [e["type"] for e in events]
-    assert "interrupt" in types
-    assert {"type": "ack", "ref": "decision"} in events
-    assert "tool_end" in types
-    # interrupt action_requests normalized to a 'tool' key
-    interrupt = next(e for e in events if e["type"] == "interrupt")
-    assert interrupt["action_requests"][0]["tool"] == "bash"
-    # second call resumes with a Command
-    from langgraph.types import Command
-    assert isinstance(graph.calls[1]["input"], Command)
+    content = "".join(e.get("content", "") for e in events if e["type"] == "content")
+    assert "hi there" in content
 
 
 def test_invalid_json_reported():
     stdin = io.StringIO("not json\n")
     stdout = io.StringIO()
-    run(FakeGraph([]), stdin, stdout, stream_mode="updates")
+    run(_stub(), stdin, stdout)
     events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
     assert any(e["type"] == "error" and "invalid JSON" in e["error"] for e in events)
+
+
+def test_unknown_command_reported():
+    events = drive(_stub(), [{"type": "nope"}, {"type": "shutdown"}])
+    assert any(e["type"] == "error" and "unknown command" in e["error"] for e in events)
+
+
+def test_empty_message_reported():
+    events = drive(_stub(), [
+        {"type": "message", "content": ""},
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "content" in e["error"] for e in events)
+
+
+def test_decision_without_list_reported():
+    events = drive(_stub(), [{"type": "decision"}, {"type": "shutdown"}])
+    assert any(e["type"] == "error" and "decisions" in e["error"] for e in events)
+
+
+def test_graph_error_surfaced():
+    """A graph that raises mid-turn surfaces an error frame, not a crash."""
+    events = drive(_boom_graph(), [
+        {"type": "message", "content": "go"},
+        {"type": "shutdown"},
+    ])
+    err = [e for e in events if e["type"] == "error"]
+    assert err and "kaboom" in err[-1]["error"]
 
 
 # ── main(): config resolution + --demo / --show-config ───────────────
@@ -217,7 +180,7 @@ def test_main_toml_supplies_agent_spec(monkeypatch, tmp_path, capsys):
     project file reaches load_agent_spec with no flags or env."""
     _isolate_config(monkeypatch, tmp_path)
     (tmp_path / "langstage.toml").write_text(
-        '[agent]\nspec = "langgraph_stream_parser.demo.stub:graph"\n'
+        '[agent]\nspec = "langstage_core.demo.stub:graph"\n'
     )
     monkeypatch.setattr(
         "sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n")
@@ -231,7 +194,7 @@ def test_main_legacy_toml_still_works(monkeypatch, tmp_path, capsys):
     """Pre-rename deepagents.toml keeps resolving as a deprecated fallback."""
     _isolate_config(monkeypatch, tmp_path)
     (tmp_path / "deepagents.toml").write_text(
-        '[agent]\nspec = "langgraph_stream_parser.demo.stub:graph"\n'
+        '[agent]\nspec = "langstage_core.demo.stub:graph"\n'
     )
     monkeypatch.setattr(
         "sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n")
@@ -293,38 +256,6 @@ def test_main_demo_end_to_end(monkeypatch, tmp_path, capsys):
     assert "hi demo" in content
 
 
-def test_unknown_command_reported():
-    events = drive(FakeGraph([]), [{"type": "nope"}, {"type": "shutdown"}])
-    assert any(e["type"] == "error" and "unknown command" in e["error"] for e in events)
-
-
-def test_empty_message_reported():
-    events = drive(FakeGraph([]), [
-        {"type": "message", "content": ""},
-        {"type": "shutdown"},
-    ])
-    assert any(e["type"] == "error" and "content" in e["error"] for e in events)
-
-
-def test_decision_without_list_reported():
-    events = drive(FakeGraph([]), [{"type": "decision"}, {"type": "shutdown"}])
-    assert any(e["type"] == "error" and "decisions" in e["error"] for e in events)
-
-
-def test_graph_error_surfaced():
-    class BoomGraph:
-        def stream(self, *a, **k):
-            raise RuntimeError("kaboom")
-            yield  # pragma: no cover
-
-    events = drive(BoomGraph(), [
-        {"type": "message", "content": "go"},
-        {"type": "shutdown"},
-    ])
-    err = [e for e in events if e["type"] == "error"]
-    assert err and "kaboom" in err[-1]["error"]
-
-
 # ── gh #19: --workspace override must reach the agent (os.environ), not just --show-config ──
 
 
@@ -344,7 +275,7 @@ def test_workspace_override_reaches_agent_env(monkeypatch, tmp_path):
     monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(env_dir))  # preset env
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n"))
 
-    rc = main(["--agent", "langgraph_stream_parser.demo.stub:graph", "--workspace", str(cli_dir)])
+    rc = main(["--agent", "langstage_core.demo.stub:graph", "--workspace", str(cli_dir)])
     assert rc == 0
     seen = Path(os.environ["LANGSTAGE_WORKSPACE_ROOT"]).resolve()
     assert seen == cli_dir.resolve(), f"override dropped: agent would read {seen}"
@@ -364,7 +295,7 @@ def test_no_override_keeps_env_workspace(monkeypatch, tmp_path):
     monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(env_dir))
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"type": "shutdown"}) + "\n"))
 
-    rc = main(["--agent", "langgraph_stream_parser.demo.stub:graph"])
+    rc = main(["--agent", "langstage_core.demo.stub:graph"])
     assert rc == 0
     assert Path(os.environ["LANGSTAGE_WORKSPACE_ROOT"]).resolve() == env_dir.resolve()
 

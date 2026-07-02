@@ -1,8 +1,9 @@
-"""Tests for the experimental in-process AG-UI sidecar path (--agui, ADR 0002).
+"""Tests for the in-process AG-UI sidecar path — the sidecar's only streaming
+path since core 1.0 (ADR 0003).
 
-Skipped unless the agui extra is installed. The dev extra pulls it so CI runs these.
-The AG-UI path drives a real LangGraph agent, so these use real graphs (not the
-FakeGraph in test_sidecar.py).
+Guarded by importorskip as a safety net, but base deps pull the AG-UI runtime
+(core's [agui] extra) so CI always runs these. The path drives a real LangGraph
+agent, so these use real compiled graphs.
 """
 import io
 import json
@@ -20,7 +21,7 @@ from langchain_core.tools import tool  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.types import interrupt  # noqa: E402
-from langgraph_stream_parser import load_agent_spec  # noqa: E402
+from langstage_core import load_agent_spec  # noqa: E402
 
 from langstage_vscode.sidecar import run  # noqa: E402
 
@@ -28,12 +29,12 @@ from langstage_vscode.sidecar import run  # noqa: E402
 def drive(graph, commands):
     stdin = io.StringIO("".join(json.dumps(c) + "\n" for c in commands) + json.dumps({"type": "shutdown"}) + "\n")
     stdout = io.StringIO()
-    run(graph, stdin, stdout, agui=True)
+    run(graph, stdin, stdout)
     return [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
 
 
 def test_text_frames_match_the_wire_shape():
-    graph = load_agent_spec("langgraph_stream_parser.demo.stub:graph")
+    graph = load_agent_spec("langstage_core.demo.stub:graph")
     frames = drive(graph, [{"type": "message", "session_id": "s", "content": "hi there"}])
     kinds = [f["type"] for f in frames]
     assert kinds[0] == "ready" and "ack" in kinds and kinds[-1] == "turn_end"

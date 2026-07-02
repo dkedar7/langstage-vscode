@@ -16,7 +16,7 @@ It has two parts in one repo:
   `@langstage` chat participant and renders agent output in the chat view.
 - **`langstage_vscode/`** — a small Python **stdio sidecar** that loads your
   agent and streams its events. Built on
-  [`langgraph-stream-parser`](https://github.com/dkedar7/langgraph-stream-parser),
+  [`langstage-core`](https://github.com/dkedar7/langstage-core),
   so it speaks the same typed event vocabulary as the other LangStage stages
   (`langstage`, `langstage-jupyter`, `langstage-cli`).
 
@@ -48,18 +48,19 @@ langstage-vscode is the VS Code stage of the **LangStage family**: write your ag
 | Terminal | [langstage-cli](https://github.com/dkedar7/langstage-cli) | `langstage-cli -a my_agent.py:graph` |
 | VS Code | langstage-vscode | **you are here** |
 | Reference agent | [langstage-hermes](https://github.com/dkedar7/langstage-hermes) | `LANGSTAGE_AGENT_SPEC=langstage_hermes.agent:graph` on any stage |
-| Shared core | [langgraph-stream-parser](https://github.com/dkedar7/langgraph-stream-parser) | typed events + config resolver behind every stage |
+| Shared core | [langstage-core](https://github.com/dkedar7/langstage-core) | typed events + config resolver + AG-UI bridge behind every stage |
 
 📖 **Full documentation:** <https://dkedar7.github.io/langstage-docs/>
 
 ### Serve over AG-UI
 
-This surface's agent — any LangGraph `CompiledGraph` — can also be served over the
-[AG-UI protocol](https://github.com/dkedar7/langgraph-stream-parser) without changing
-your agent code:
+The sidecar already streams every turn through the in-process AG-UI adapter. Your
+agent — any LangGraph `CompiledGraph` — can also be served over the
+[AG-UI protocol](https://github.com/dkedar7/langstage-core) as a standalone HTTP
+endpoint, without changing your agent code:
 
 ```bash
-pip install "langgraph-stream-parser[agui]"
+pip install "langstage-core[agui]"
 langstage-agui --agent my_agent.py:graph
 ```
 
@@ -154,8 +155,8 @@ python -m langstage_vscode --demo
 {"type": "shutdown"}
 ```
 
-**Events** (sidecar → client) — the `event.to_dict()` shapes from
-`langgraph-stream-parser`, plus a few protocol frames:
+**Events** (sidecar → client) — the `event_to_dict()` shapes from
+`langstage-core`, plus a few protocol frames:
 
 ```jsonc
 {"type": "ready"}                          // emitted once at startup

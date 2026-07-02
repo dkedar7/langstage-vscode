@@ -27,7 +27,7 @@ def ensure_agui_available() -> None:
     """Raise a clean, actionable error if the AG-UI adapter isn't installed."""
     try:
         import ag_ui_langgraph  # noqa: F401
-        from langgraph_stream_parser.agui import build_agent  # noqa: F401
+        from langstage_core.agui import build_agent  # noqa: F401
     except ImportError as e:  # pragma: no cover - only without the extra
         raise RuntimeError(_IMPORT_HINT) from e
 
@@ -36,7 +36,7 @@ def build_session_agent(graph: Any, *, name: str = "langstage-vscode") -> Any:
     """Wrap the graph once (checkpointer attached by the core bridge); thread_id
     is passed per turn via the session_id, so per-session state persists."""
     ensure_agui_available()
-    from langgraph_stream_parser.agui import build_agent
+    from langstage_core.agui import build_agent
 
     return build_agent(graph, name=name)
 
@@ -62,7 +62,7 @@ async def agui_events(
     The mapping itself lives in the core (``agui.iter_event_frames``, 0.6.16) —
     shared with the web ``SessionAdapter`` — so a rendering fix lands once.
     """
-    from langgraph_stream_parser.agui import iter_event_frames
+    from langstage_core.agui import iter_event_frames
 
     async for frame in iter_event_frames(
         agent, message, thread_id, resume=resume, max_result_len=max_result_len

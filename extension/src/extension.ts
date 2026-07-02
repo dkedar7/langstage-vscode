@@ -5,9 +5,9 @@ import * as readline from 'readline';
 /**
  * Deep Agent VS Code chat participant.
  *
- * Registers `@deepagent` in the chat panel (alongside Copilot) and bridges each
- * turn to the Python `deepagent-vscode` sidecar over stdio. The sidecar emits
- * newline-delimited JSON events — the langgraph-stream-parser `event.to_dict()`
+ * Registers `@langstage` in the chat panel (alongside Copilot) and bridges each
+ * turn to the Python `langstage-vscode` sidecar over stdio. The sidecar emits
+ * newline-delimited JSON events — the langstage-core `event_to_dict()`
  * wire vocabulary — which the dispatcher below maps onto the chat response.
  */
 export function activate(context: vscode.ExtensionContext) {

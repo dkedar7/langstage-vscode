@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.4.10"
+version = "0.5.0"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 license = "MIT"
 requires-python = ">=3.11"
@@ -13,32 +13,33 @@ authors = [
 ]
 keywords = ["langgraph", "langchain", "langstage", "vscode", "agents", "ai"]
 dependencies = [
-    # >=0.6.4 modernizes off the stale <0.5 pin and carries the dual-mode content
-    # fallback, so a CompiledGraph returning a finished AIMessage (non-token-
-    # streaming agents) renders content instead of an empty chat turn (gh #-dogfood).
-    # >=0.6.11 carries describe(omit_keys=...) (so --show-config can hide the
-    # inherited server/ui keys this stdio sidecar doesn't honor), the honest stub
-    # missing-deps error, and the full LANGSTAGE_SUPPRESS_LEGACY_NOTICE opt-out.
-    "langgraph-stream-parser>=0.6.16,<0.7",
+    # Since core 1.0 (ADR 0003) the sidecar streams turns ONLY through the
+    # in-process AG-UI adapter — there is no built-in parser fallback — so the
+    # AG-UI runtime (ag-ui-langgraph[fastapi] + uvicorn, pulled by core's [agui]
+    # extra) is a HARD runtime requirement, not an opt-in. A bare
+    # `pip install langstage-vscode` must be able to run a turn.
+    "langstage-core[agui]>=1.0",
 ]
 
 [project.optional-dependencies]
+# Redundant since AG-UI moved into base deps (core 1.0); kept as a no-op alias so
+# existing `pip install langstage-vscode[agui]` scripts/READMEs still resolve.
 agui = [
-    "langgraph-stream-parser[agui]>=0.6.16,<0.7",
+    "langstage-core[agui]>=1.0",
 ]
 demo = [
     # The `--demo` agent is the keyless echo stub (langgraph_stream_parser.demo.stub),
     # which needs only langgraph — NOT the whole deepagents ML stack (~30 packages,
     # incl. anthropic/google-genai). Pull core's lightweight [stub] extra instead.
     # (gh #-dogfood: base install + --demo errored, and [demo] was needlessly heavy.)
-    "langgraph-stream-parser[stub]>=0.6.11,<0.7",
+    "langstage-core[stub]>=1.0",
 ]
 dev = [
     "pytest>=8",
     "langgraph>=1.1.0",
     "langchain-core>=1.4.0",
-    # The experimental AG-UI path (ADR 0002); pulled into dev so CI exercises
-    # tests/test_agui_sidecar.py instead of skipping it.
+    # AG-UI runtime for the sidecar's only streaming path (base deps pull this via
+    # core's [agui] extra; pinned here too so the test env is explicit).
     "ag-ui-langgraph>=0.0.41",
     "fastapi",
 ]

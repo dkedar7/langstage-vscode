@@ -1,10 +1,10 @@
 """stdio sidecar bridging a LangGraph agent to the langstage-vscode extension.
 
 Reads newline-delimited JSON commands on stdin, runs the agent through
-``langgraph-stream-parser``, and writes newline-delimited JSON events on
-stdout. The events are exactly ``event.to_dict()`` shapes — the same wire
-vocabulary every other deep-agent surface (FastAPI WebSocket/SSE, Jupyter, CLI)
-emits — so the TS extension's dispatcher renders them the same way.
+``langstage-core``'s in-process AG-UI adapter, and writes newline-delimited JSON
+events on stdout. The events are exactly ``event_to_dict()`` shapes — the same
+wire vocabulary every other LangStage surface (web, Jupyter, CLI) emits — so the
+TS extension's dispatcher renders them the same way.
 
 Commands (client -> sidecar), one JSON object per line:
     {"type": "message",  "session_id": "s1", "content": "..."}
@@ -24,15 +24,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Iterable, TextIO
 
-from langgraph_stream_parser import (
-    StreamParser,
-    create_resume_input,
-    event_to_dict,
-    load_agent_spec,
-    prepare_agent_input,
-)
+from langstage_core import load_agent_spec
 
-DEFAULT_STREAM_MODE = ["updates", "messages"]
 DEFAULT_MAX_RESULT_LEN = 50_000
 
 
@@ -41,36 +34,28 @@ def run(
     stdin: Iterable[str],
     stdout: TextIO,
     *,
-    stream_mode: str | list[str] = DEFAULT_STREAM_MODE,
     max_result_len: int = DEFAULT_MAX_RESULT_LEN,
-    agui: bool = False,
+    **_legacy: Any,  # accepts + ignores the removed stream_mode/agui kwargs
 ) -> None:
     """Drive the command/event loop over the given streams.
 
-    Factored out from ``main`` so it can be tested with in-memory streams and
-    a fake graph. ``stdin`` is any line iterable; ``stdout`` needs ``write``.
-
-    When ``agui`` is set (experimental, ADR 0002), turns stream through the
-    in-process AG-UI adapter instead of the built-in parser, emitting the SAME
-    ``event_to_dict`` frames so the TS extension is unchanged.
+    Since langstage-core 1.0 (ADR 0003) turns stream through the in-process AG-UI
+    adapter — the only path — emitting ``event_to_dict``-shaped frames so the TS
+    extension is unchanged. ``stdin`` is any line iterable; ``stdout`` needs ``write``.
     """
-    mode = list(stream_mode) if isinstance(stream_mode, tuple) else stream_mode
-
     def emit(obj: dict[str, Any]) -> None:
         stdout.write(json.dumps(obj) + "\n")
         stdout.flush()
 
     emit({"type": "ready"})
 
-    agui_agent = None
-    if agui:
-        from .agui_stream import build_session_agent
+    from .agui_stream import build_session_agent
 
-        try:
-            agui_agent = build_session_agent(graph)
-        except RuntimeError as exc:
-            emit({"type": "error", "error": str(exc)})
-            return
+    try:
+        agui_agent = build_session_agent(graph)
+    except RuntimeError as exc:
+        emit({"type": "error", "error": str(exc)})
+        return
 
     for raw in stdin:
         line = raw.strip()
@@ -97,47 +82,20 @@ def run(
                 emit({"type": "error", "error": "message requires 'content'"})
                 continue
             emit({"type": "ack", "ref": "message"})
-            if agui_agent is not None:
-                agui_message = content
-            else:
-                input_data = prepare_agent_input(message=content)
+            agui_message = content
         elif ctype == "decision":
             decisions = cmd.get("decisions")
             if not isinstance(decisions, list):
                 emit({"type": "error", "error": "decision requires 'decisions' list"})
                 continue
             emit({"type": "ack", "ref": "decision"})
-            if agui_agent is not None:
-                agui_resume = {"decisions": decisions}
-            else:
-                input_data = create_resume_input(decisions=decisions)
+            agui_resume = {"decisions": decisions}
         else:
             emit({"type": "error", "error": f"unknown command type: {ctype!r}"})
             continue
 
-        if agui_agent is not None:
-            _run_turn_agui(agui_agent, agui_message, agui_resume, config, max_result_len, emit)
-        else:
-            _run_turn(graph, input_data, config, mode, max_result_len, emit)
+        _run_turn_agui(agui_agent, agui_message, agui_resume, config, max_result_len, emit)
         emit({"type": "turn_end", "session_id": session_id})
-
-
-def _run_turn(
-    graph: Any,
-    input_data: Any,
-    config: dict[str, Any],
-    stream_mode: str | list[str],
-    max_result_len: int,
-    emit: Callable[[dict[str, Any]], None],
-) -> None:
-    """Stream one turn; the parser emits the terminal complete/error event."""
-    parser = StreamParser(stream_mode=stream_mode)
-    try:
-        stream = graph.stream(input_data, config=config, stream_mode=stream_mode)
-        for event in parser.parse(stream):
-            emit(event_to_dict(event, max_result_len=max_result_len))
-    except Exception as exc:  # noqa: BLE001 — surfaced to the client as an event
-        emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
 
 
 def _run_turn_agui(
@@ -148,8 +106,8 @@ def _run_turn_agui(
     max_result_len: int,
     emit: Callable[[dict[str, Any]], None],
 ) -> None:
-    """Stream one turn through the in-process AG-UI adapter, emitting the same
-    ``event_to_dict`` frames the built-in parser does (experimental, ADR 0002)."""
+    """Stream one turn through the in-process AG-UI adapter, emitting
+    ``event_to_dict``-shaped frames (the sidecar's only streaming path, ADR 0003)."""
     from .agui_stream import stream_events_sync
 
     thread_id = config.get("configurable", {}).get("thread_id", "default")
@@ -163,7 +121,7 @@ def _run_turn_agui(
 
 
 # The keyless echo agent shipped with the shared core — see `--demo`.
-DEMO_AGENT_SPEC = "langgraph_stream_parser.demo.stub:graph"
+DEMO_AGENT_SPEC = "langstage_core.demo.stub:graph"
 
 
 def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
@@ -243,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     import os
     import sys
 
-    from langgraph_stream_parser.host import HostConfig
+    from langstage_core.host import HostConfig
 
     parser = argparse.ArgumentParser(prog="langstage-vscode-sidecar")
     parser.add_argument(
@@ -261,13 +219,6 @@ def main(argv: list[str] | None = None) -> int:
         "--demo",
         action="store_true",
         help="Run with the built-in keyless demo agent (no API key needed).",
-    )
-    parser.add_argument(
-        "--agui",
-        action="store_true",
-        help="[experimental] Stream via the in-process AG-UI adapter instead of the "
-        "built-in parser (ADR 0002); emits the same event frames. Also enabled by "
-        'LANGSTAGE_VSCODE_AGUI=1. Requires the agui extra: pip install "langstage-vscode[agui]".',
     )
     parser.add_argument(
         "--show-config",
@@ -346,13 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         return fail(f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}")
 
-    agui = args.agui or os.getenv("LANGSTAGE_VSCODE_AGUI", os.getenv("DEEPAGENT_VSCODE_AGUI", "")).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    run(graph, sys.stdin, sys.stdout, agui=agui)
+    run(graph, sys.stdin, sys.stdout)
     return 0
 
 
