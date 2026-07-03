@@ -19,12 +19,13 @@ Events (sidecar -> client), one JSON object per line:
     {"type": "complete"} | {"type": "error", "error": "..."}
     {"type": "turn_end", "session_id": "s1"}   # one turn finished
 """
+
 from __future__ import annotations
 
 import json
 from typing import Any, Callable, Iterable, TextIO
 
-from langstage_core import load_agent_spec
+from langstage_core import apply_workspace, load_agent_spec
 
 DEFAULT_MAX_RESULT_LEN = 50_000
 
@@ -43,6 +44,7 @@ def run(
     adapter — the only path — emitting ``event_to_dict``-shaped frames so the TS
     extension is unchanged. ``stdin`` is any line iterable; ``stdout`` needs ``write``.
     """
+
     def emit(obj: dict[str, Any]) -> None:
         stdout.write(json.dumps(obj) + "\n")
         stdout.flush()
@@ -94,7 +96,9 @@ def run(
             emit({"type": "error", "error": f"unknown command type: {ctype!r}"})
             continue
 
-        _run_turn_agui(agui_agent, agui_message, agui_resume, config, max_result_len, emit)
+        _run_turn_agui(
+            agui_agent, agui_message, agui_resume, config, max_result_len, emit
+        )
         emit({"type": "turn_end", "session_id": session_id})
 
 
@@ -113,7 +117,11 @@ def _run_turn_agui(
     thread_id = config.get("configurable", {}).get("thread_id", "default")
     try:
         for frame in stream_events_sync(
-            agent, message or "", thread_id, resume=resume, max_result_len=max_result_len
+            agent,
+            message or "",
+            thread_id,
+            resume=resume,
+            max_result_len=max_result_len,
         ):
             emit(frame)
     except Exception as exc:  # noqa: BLE001 — surfaced to the client as an event
@@ -134,20 +142,20 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     graph — otherwise stay invisible until the first ``@langstage`` message, where
     they surface as a cryptic ``'...' object has no attribute 'stream'``. (gh #21)
     """
-    import os
     import sys
 
     from langstage_vscode import __version__
 
     # Hand the agent the resolved workspace, same as the real run path.
-    resolved_root = str(cfg.workspace_root)
-    os.environ["LANGSTAGE_WORKSPACE_ROOT"] = resolved_root
-    os.environ["DEEPAGENT_WORKSPACE_ROOT"] = resolved_root
+    apply_workspace(cfg.workspace_root)
 
     def verdict(ok: bool, msg: str) -> int:
         if as_json:
             sys.stdout.write(
-                json.dumps({"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}) + "\n"
+                json.dumps(
+                    {"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}
+                )
+                + "\n"
             )
             sys.stdout.flush()
         else:
@@ -158,7 +166,9 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     try:
         graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001 — reported as the verdict
-        return verdict(False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}")
+        return verdict(
+            False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}"
+        )
 
     # 2. Runnable check — the sharp case: it loaded, but it isn't a CompiledGraph.
     # Name the spec and what it actually loaded instead of deferring to a
@@ -188,7 +198,9 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
         err = next(f.get("error") for f in frames if f.get("type") == "error")
         return verdict(False, f"agent spec {spec!r} errored driving a turn: {err}")
     if "complete" not in types or "turn_end" not in types:
-        return verdict(False, f"agent spec {spec!r} did not complete a turn (frames: {types})")
+        return verdict(
+            False, f"agent spec {spec!r} did not complete a turn (frames: {types})"
+        )
 
     return verdict(
         True,
@@ -198,7 +210,6 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
-    import os
     import sys
 
     from langstage_core.host import HostConfig
@@ -283,15 +294,15 @@ def main(argv: list[str] | None = None) -> int:
             "or set [agent].spec in langstage.toml)"
         )
 
-    # Hand the RESOLVED workspace to the agent. cfg.workspace_root already applied
-    # precedence (CLI --workspace > env > toml), so it is authoritative — assign it,
-    # don't setdefault. setdefault was a no-op when LANGSTAGE_WORKSPACE_ROOT was
-    # already exported, so the agent read the stale env value while --show-config
-    # reported the --workspace override as winning. Keep the legacy name in sync so
-    # an agent reading the deprecated var doesn't get a stale directory. (gh #19)
-    resolved_root = str(cfg.workspace_root)
-    os.environ["LANGSTAGE_WORKSPACE_ROOT"] = resolved_root
-    os.environ["DEEPAGENT_WORKSPACE_ROOT"] = resolved_root
+    # Hand the RESOLVED workspace to the agent via the shared source of truth
+    # (ADR 0005). cfg.workspace_root already applied precedence (CLI --workspace >
+    # env > toml), so it is authoritative; apply_workspace publishes it to the env
+    # the agent reads (canonical + legacy names) and records it as the active
+    # workspace for workspace_root(). No chdir — the sidecar loads the agent spec
+    # (possibly a relative path) right after, and must resolve it against the
+    # invocation cwd, not the workspace (cf. cli gh #30). Replaces the manual
+    # env-assign that fixed the setdefault no-op (gh #19).
+    apply_workspace(cfg.workspace_root)
     try:
         graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001
