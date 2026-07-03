@@ -70,9 +70,10 @@ langstage-agui --agent my_agent.py:graph
 
 ```bash
 pip install langstage-vscode
-# or, for a quick try with the bundled default agent:
-pip install "langstage-vscode[demo]"
 ```
+
+`--demo` (the keyless echo stub) runs on this base install — since 0.5.0 the base
+deps pull the AG-UI runtime, which brings `langgraph`, so no extra is needed.
 
 ### Extension (from source, until it's on the Marketplace)
 
@@ -141,9 +142,7 @@ directly for testing:
 ```bash
 LANGSTAGE_AGENT_SPEC=./my_agent.py:graph python -m langstage_vscode
 
-# or with no agent and no API key at all — needs the [demo] extra
-# (a base install ships only the sidecar; --demo's stub agent needs langgraph):
-#   pip install "langstage-vscode[demo]"
+# or with no agent and no API key at all — the keyless stub runs on a base install
 python -m langstage_vscode --demo
 ```
 
