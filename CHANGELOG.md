@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-07-03
+
+### Changed
+- **Workspace root is now handed to the agent through the shared
+  `core.apply_workspace()` (ADR 0005).** Replaces the two manual
+  `os.environ["LANGSTAGE_WORKSPACE_ROOT"] = ...` blocks (the real run path and
+  `--selfcheck`) with the one source of truth. Same behavior — the resolved
+  workspace still reaches the agent via the canonical + legacy env vars (the gh #19
+  fix is preserved) — plus it's now recorded as the active workspace for
+  `core.workspace_root()` and the dir is ensured. No `chdir` (the sidecar loads a
+  possibly-relative spec right after, which must resolve against the invocation
+  cwd). Requires `langstage-core>=1.0.7`.
+
 ## [0.5.1] - 2026-07-03
 
 ### Fixed
