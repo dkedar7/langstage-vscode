@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-07-03
+
+### Fixed
+- **README no longer claims `--demo` needs the `[demo]` extra (gh #30).** Since
+  0.5.0 the base deps pull `langstage-core[agui]`, which brings `langgraph`, so
+  the keyless echo stub runs on a bare `pip install langstage-vscode` — verified
+  clean-room. Dropped the stale "needs the `[demo]` extra / base ships only the
+  sidecar" notes from both README install blocks, and marked the `[demo]` extra
+  a redundant no-op alias in `pyproject.toml` (kept so existing install commands
+  still resolve). Also fixed a stale `langgraph_stream_parser.demo.stub` mention
+  in that extra's comment (the module is `langstage_core.demo.stub`).
+
 ## [0.5.0] - 2026-07-02
 
 ### Changed
