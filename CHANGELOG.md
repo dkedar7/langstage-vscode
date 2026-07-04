@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-07-04
+
+### Fixed
+- **A `decision` command with an empty `decisions: []` is now rejected with an
+  `error` frame (gh #33).** The sidecar used to `ack` it and drive a full, spurious
+  agent turn — with no interrupt to resume — instead of the promised `error` frame,
+  inconsistent with the `message` path that rejects empty content. It now errors
+  (`decision requires a non-empty 'decisions' list`) like the docs advertise.
+
 ## [0.5.2] - 2026-07-03
 
 ### Changed

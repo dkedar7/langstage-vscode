@@ -87,8 +87,11 @@ def run(
             agui_message = content
         elif ctype == "decision":
             decisions = cmd.get("decisions")
-            if not isinstance(decisions, list):
-                emit({"type": "error", "error": "decision requires 'decisions' list"})
+            # An empty list is as invalid as a non-list: there's no interrupt to
+            # resume, so it must error, not ack + drive a spurious turn — mirroring
+            # the `message` path's empty-content rejection above. (gh #33)
+            if not isinstance(decisions, list) or not decisions:
+                emit({"type": "error", "error": "decision requires a non-empty 'decisions' list"})
                 continue
             emit({"type": "ack", "ref": "decision"})
             agui_resume = {"decisions": decisions}
