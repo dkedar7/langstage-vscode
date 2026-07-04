@@ -117,6 +117,16 @@ def test_decision_without_list_reported():
     assert any(e["type"] == "error" and "decisions" in e["error"] for e in events)
 
 
+def test_empty_decision_list_reported():
+    # gh #33: an empty `decisions: []` has no interrupt to resume, so it must emit an
+    # `error` frame like the empty-`message` path — not ack + drive a spurious turn.
+    events = drive(_stub(), [{"type": "decision", "decisions": []}, {"type": "shutdown"}])
+    assert any(e["type"] == "error" and "decisions" in e["error"] for e in events)
+    # And it must NOT ack or run a turn.
+    assert not any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
+    assert not any(e.get("type") == "turn_end" for e in events)
+
+
 def test_graph_error_surfaced():
     """A graph that raises mid-turn surfaces an error frame, not a crash."""
     events = drive(_boom_graph(), [
