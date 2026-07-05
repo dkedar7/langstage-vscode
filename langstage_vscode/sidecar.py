@@ -23,9 +23,10 @@ Events (sidecar -> client), one JSON object per line:
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Callable, Iterable, TextIO
 
-from langstage_core import apply_workspace, load_agent_spec
+from langstage_core import apply_workspace, load_agent_spec, workspace_root
 
 DEFAULT_MAX_RESULT_LEN = 50_000
 
@@ -302,15 +303,18 @@ def main(argv: list[str] | None = None) -> int:
     # (ADR 0005). cfg.workspace_root already applied precedence (CLI --workspace >
     # env > toml), so it is authoritative; apply_workspace publishes it to the env
     # the agent reads (canonical + legacy names) and records it as the active
-    # workspace for workspace_root(). No chdir — the sidecar loads the agent spec
-    # (possibly a relative path) right after, and must resolve it against the
-    # invocation cwd, not the workspace (cf. cli gh #30). Replaces the manual
-    # env-assign that fixed the setdefault no-op (gh #19).
+    # workspace for workspace_root(). Replaces the manual env-assign (gh #19).
     apply_workspace(cfg.workspace_root)
     try:
         graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001
         return fail(f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}")
+
+    # Operate the agent from the workspace as cwd (ADR 0006), AFTER resolving the
+    # spec (a relative -a ./x.py:graph must resolve against the invocation cwd, cf.
+    # cli gh #30) — so a bring-your-own agent's raw relative file writes land in the
+    # workspace instead of the launch cwd, matching cli. Single-process, single-agent.
+    os.chdir(workspace_root())
 
     run(graph, sys.stdin, sys.stdout)
     return 0
