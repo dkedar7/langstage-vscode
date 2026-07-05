@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.6] - 2026-07-05
+
+### Fixed
+- **`--agui` no longer hard-crashes the sidecar (gh #38).** The 0.5.0 CHANGELOG
+  promised the removed `--agui` flag would be *accepted-and-ignored for one release*
+  so existing launch configs don't break — but the shim was never implemented, so
+  passing `--agui` made `argparse` reject it (`unrecognized arguments`) and the
+  sidecar exited **2 without ever emitting `ready`**. It is now accepted and silently
+  ignored (hidden from `--help`), honoring the documented promise. The
+  `LANGSTAGE_VSCODE_AGUI` env half already behaved.
+
 ## [0.5.5] - 2026-07-04
 
 ### Fixed

@@ -262,6 +262,13 @@ def main(argv: list[str] | None = None) -> int:
         version=f"langstage-vscode-sidecar {__version__}",
         help="Print the version and exit.",
     )
+    # Removed in 0.5.0 (AG-UI is the only streaming path now, ADR 0003), but the
+    # 0.5.0 CHANGELOG promised --agui would be *accepted-and-ignored* so existing
+    # launch configs carrying the old opt-in flag don't crash on upgrade. That shim
+    # was never actually implemented, so passing --agui hard-crashed argparse with
+    # exit 2 — the exact breakage the promise meant to prevent (gh #38). Accept and
+    # ignore it (hidden from --help; the env-var half was already tolerated).
+    parser.add_argument("--agui", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     # Same resolution chain as every other deep-agent surface:

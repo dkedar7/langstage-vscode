@@ -163,6 +163,16 @@ def test_main_accepts_short_agent_flag(monkeypatch, tmp_path, capsys):
     assert "langstage_core.demo.stub:graph" in capsys.readouterr().out
 
 
+def test_main_accepts_and_ignores_removed_agui_flag(monkeypatch, tmp_path, capsys):
+    # gh #38: --agui was removed in 0.5.0 (AG-UI is the only path), but the 0.5.0
+    # CHANGELOG promised it stays accepted-and-ignored for a transition window so old
+    # launch configs don't crash. It must NOT raise argparse "unrecognized arguments"
+    # (exit 2) — the sidecar proceeds exactly as if the flag weren't there.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--agui", "-a", "langstage_core.demo.stub:graph", "--show-config"]) == 0
+    assert "langstage_core.demo.stub:graph" in capsys.readouterr().out
+
+
 def test_main_show_config_omits_inert_server_keys(monkeypatch, tmp_path, capsys):
     # The stdio sidecar never opens a socket or renders a UI, so host/port/debug/
     # title do nothing — --show-config must not advertise them. (gh #14)
