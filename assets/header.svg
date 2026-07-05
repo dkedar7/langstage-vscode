@@ -43,7 +43,7 @@
     <text x="214" y="300" fill="#34506A">&#8226;</text>
     <text x="236" y="300">python sidecar</text>
     <text x="372" y="300" fill="#34506A">&#8226;</text>
-    <text x="394" y="300">langgraph-stream-parser</text>
+    <text x="394" y="300">langstage-core</text>
   </g>
 
   <!-- ===== right: chat-panel mock ===== -->
