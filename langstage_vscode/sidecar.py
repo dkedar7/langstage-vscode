@@ -219,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="langstage-vscode-sidecar")
     parser.add_argument(
+        "-a",
         "--agent",
         default=None,
         help="Agent spec 'path.py:var' or 'module:var' "
