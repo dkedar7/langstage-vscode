@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.5] - 2026-07-04
+
+### Fixed
+- **The sidecar now operates the agent from the workspace as its cwd (ADR 0006).**
+  After resolving the agent spec, it `chdir`s into the resolved workspace, so a
+  bring-your-own agent's raw relative file writes (`Path("out.txt").write_text(…)`)
+  land in the workspace instead of the launch dir — matching the cli. The spec is
+  resolved first, so a relative `-a ./x.py:graph` still resolves against the
+  invocation cwd.
+
 ## [0.5.4] - 2026-07-04
 
 ### Fixed

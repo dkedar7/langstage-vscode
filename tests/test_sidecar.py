@@ -353,3 +353,18 @@ def test_selfcheck_json_verdict(monkeypatch, tmp_path, capsys):
     assert rc == 0
     verdict = json.loads(capsys.readouterr().out.strip())
     assert verdict["type"] == "selfcheck" and verdict["ok"] is True
+
+
+def test_main_operates_from_workspace_cwd(monkeypatch, tmp_path):
+    # ADR 0006: main() chdirs into the resolved workspace AFTER resolving the spec, so a
+    # BYO agent's raw relative writes land in the workspace. (conftest restores cwd.)
+    import os
+    from pathlib import Path
+
+    _isolate_config(monkeypatch, tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # empty -> run() loop exits at once
+    rc = main(["--agent", "langstage_core.demo.stub:graph", "--workspace", str(ws)])
+    assert rc == 0
+    assert Path(os.getcwd()).resolve() == ws.resolve()
