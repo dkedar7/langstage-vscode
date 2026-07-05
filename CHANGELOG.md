@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] - 2026-07-04
+
+### Fixed
+- **The sidecar accepts `-a` as a short alias for `--agent` (dogfood).** The cli uses
+  `-a`, so `python -m langstage_vscode -a my_agent.py:graph` used to fail with
+  "unrecognized arguments: -a" — muscle memory from the cli examples broke on vscode.
+  Both `-a` and `--agent` now work.
+
 ## [0.5.3] - 2026-07-04
 
 ### Fixed

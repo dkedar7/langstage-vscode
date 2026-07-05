@@ -155,6 +155,14 @@ def test_main_show_config(monkeypatch, tmp_path, capsys):
     assert "LANGSTAGE_AGENT_SPEC" in capsys.readouterr().out
 
 
+def test_main_accepts_short_agent_flag(monkeypatch, tmp_path, capsys):
+    # gh dogfood-F9: cli uses `-a`; the sidecar accepts it too (was --agent only), so
+    # the same spec + flag work across surfaces.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["-a", "langstage_core.demo.stub:graph", "--show-config"]) == 0
+    assert "langstage_core.demo.stub:graph" in capsys.readouterr().out
+
+
 def test_main_show_config_omits_inert_server_keys(monkeypatch, tmp_path, capsys):
     # The stdio sidecar never opens a socket or renders a UI, so host/port/debug/
     # title do nothing — --show-config must not advertise them. (gh #14)
