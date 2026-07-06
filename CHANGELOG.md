@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.7] - 2026-07-06
+
+### Fixed
+- **The standard HumanInterrupt shape no longer crashes an interrupt turn, and no
+  asyncio warning leaks to stderr (gh #40).** Driving the sidecar with the list of
+  `HumanInterrupt` dicts that deepagents / langchain HITL actually emit
+  (`[{"action_request": {...}, "config": {...}}, ...]`) used to yield
+  `error: 'list' object has no attribute 'get'` instead of an interrupt frame. The root
+  cause was in core's `on_interrupt` handler — fixed in **langstage-core 1.0.10** (now the
+  minimum pin), which normalizes the HumanInterrupt list, our own keyed dict, and a plain
+  dict. The sidecar now surfaces a real `interrupt` frame with `action_requests`
+  populated and resumes.
+- **(Defect 2, this repo)** `stream_events_sync` closed its event loop without draining
+  the async generator, so an exception escaping mid-stream (or a consumer stopping early)
+  left a pending task alive and asyncio logged *"Task was destroyed but it is pending!"*
+  to stderr — bad for a stdio sidecar. It now `aclose()`s the generator and
+  `shutdown_asyncgens()` before closing the loop.
+
 ## [0.5.6] - 2026-07-05
 
 ### Fixed
