@@ -77,14 +77,28 @@ def stream_events_sync(agent, message, thread_id, *, resume=None, max_result_len
     import asyncio
 
     loop = asyncio.new_event_loop()
+    agen = agui_events(
+        agent, message, thread_id, resume=resume, max_result_len=max_result_len
+    )
     try:
-        agen = agui_events(
-            agent, message, thread_id, resume=resume, max_result_len=max_result_len
-        )
         while True:
             try:
                 yield loop.run_until_complete(agen.__anext__())
             except StopAsyncIteration:
                 break
     finally:
+        # Close the async generator (cancelling any still-pending ag-ui run task) and
+        # shut down async gens BEFORE closing the loop. Otherwise an exception that
+        # escapes mid-stream — or a consumer that stops early — leaves the generator's
+        # pending athrow task alive, and asyncio logs "Task was destroyed but it is
+        # pending!" to stderr. For a stdio sidecar that stderr is exactly where stray
+        # output must not go (gh #40, Defect 2).
+        try:
+            loop.run_until_complete(agen.aclose())
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            pass
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:  # noqa: BLE001
+            pass
         loop.close()
