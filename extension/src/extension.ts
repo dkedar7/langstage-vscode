@@ -153,7 +153,11 @@ function dispatch(event: AgentEvent, stream: vscode.ChatResponseStream): void {
       // (sending {"type":"decision",...} back to the sidecar) is the next
       // increment — it needs a confirmation affordance in the chat UI.
       const actions = (event.action_requests as Array<Record<string, unknown>>) ?? [];
-      const tool = actions[0]?.tool ?? 'an action';
+      // The runtime emits the standard HumanInterrupt action_request shape —
+      // {"action": <tool>, "args": {...}} — so read `.action`. Fall back to `.tool`
+      // for a keyed-dict interrupt, then to a generic label (gh #44).
+      const first = actions[0] ?? {};
+      const tool = first.action ?? first.tool ?? 'an action';
       stream.markdown(
         `\n\n⚠️ The agent wants to run **${String(tool)}** and is waiting for ` +
           'approval. Interactive approval is not wired up yet in this build.\n',
