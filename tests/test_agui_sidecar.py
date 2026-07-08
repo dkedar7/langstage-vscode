@@ -90,8 +90,13 @@ def test_tool_start_and_end_frames():
 
 
 def _interrupt_graph():
+    # The STANDARD HumanInterrupt shape a real deepagents/langchain HITL agent emits —
+    # its action_request is {"action": <tool>, "args": {...}} (key `action`, NOT `tool`).
+    # The old test used a fictional {"tool": ...} shape that masked gh #44 (the extension
+    # read `.tool`, which the runtime never emits).
     def gate(state):
-        d = interrupt({"action_requests": [{"tool": "approve", "args": {"x": 1}}]})
+        d = interrupt([{"action_request": {"action": "approve_tool", "args": {"x": 1}},
+                        "config": {"allow_accept": True}}])
         return {"messages": [AIMessage(content=f"ok {d}")]}
 
     b = StateGraph(MessagesState)
@@ -107,7 +112,9 @@ def test_interrupt_frame_then_resume_continues():
         {"type": "decision", "session_id": "s", "decisions": [{"type": "accept"}]},
     ])
     interrupts = [f for f in frames if f["type"] == "interrupt"]
-    assert interrupts and interrupts[0]["action_requests"][0]["tool"] == "approve"
+    # The frame carries the real action under `action` (what the extension renders, gh #44).
+    assert interrupts and interrupts[0]["action_requests"][0]["action"] == "approve_tool"
+    assert "tool" not in interrupts[0]["action_requests"][0]  # not the fictional shape
     assert "allowed_decisions" in interrupts[0]
     # after the decision, the graph continues and emits the resolved content
     text = "".join(f["content"] for f in frames if f["type"] == "content")

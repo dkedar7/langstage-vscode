@@ -2,7 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.8] - 2026-07-07
+## [0.5.9] - 2026-07-08
+
+### Fixed
+- **The interrupt card now names the real action instead of "an action" (gh #44).** The
+  VS Code extension rendered the HITL approval card from `action_requests[0].tool`, but the
+  sidecar emits the standard `HumanInterrupt` action request as `{"action": <tool>, "args":
+  {...}}` (key `action`, never `tool`) — so the card always fell back to *"The agent wants
+  to run **an action**"* and could never show e.g. `delete_file`. The extension now reads
+  `.action` (falling back to `.tool`, then a generic label). The masking sidecar test that
+  drove a fictional `{"tool": ...}` shape was switched to the real `HumanInterrupt` shape.
 
 ### Fixed
 - **`--show-config` no longer crashes on a cp1252 stdout when a resolved value has a
