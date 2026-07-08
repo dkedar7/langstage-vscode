@@ -2,7 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.7] - 2026-07-06
+## [0.5.8] - 2026-07-07
+
+### Fixed
+- **`--show-config` no longer crashes on a cp1252 stdout when a resolved value has a
+  non-Latin-1 character (gh #42).** The VS Code extension spawns the sidecar over a cp1252
+  pipe (and a Western-Windows console is cp1252 too), both with the `strict` error handler
+  — so a resolved value containing a CJK/Cyrillic character (an agent spec, or a project
+  path under a non-Latin-1 folder) made the bare `print(cfg.describe(...))` die with a raw
+  `UnicodeEncodeError` and emit nothing. The protocol path was already ASCII-safe; the
+  `--show-config` text path now degrades unrepresentable characters to escapes instead of
+  crashing (full fidelity is preserved on a UTF-8 stdout).
 
 ### Fixed
 - **The standard HumanInterrupt shape no longer crashes an interrupt turn, and no
