@@ -282,7 +282,15 @@ def main(argv: list[str] | None = None) -> int:
         # UI, so the inherited host/port/debug/title keys do nothing here.
         # Hide them so --show-config only advertises what the sidecar honors
         # (agent_spec, workspace_root). (gh #14)
-        print(cfg.describe(omit_keys=["host", "port", "debug", "title"]))
+        text = cfg.describe(omit_keys=["host", "port", "debug", "title"])
+        # The VS Code extension spawns the sidecar with a cp1252 pipe (and a Western-
+        # Windows console is cp1252 too), both with the `strict` error handler — so a
+        # resolved value with a non-Latin-1 char (a CJK/Cyrillic agent spec or project
+        # path) made this raw-text print crash with UnicodeEncodeError and emit nothing.
+        # The protocol path is already ASCII-safe (ensure_ascii); make this one robust
+        # too by degrading unrepresentable chars to escapes instead of crashing. (gh #42)
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(enc, "backslashreplace").decode(enc, "replace"))
         return 0
 
     def fail(msg: str) -> int:

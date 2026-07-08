@@ -155,6 +155,30 @@ def test_main_show_config(monkeypatch, tmp_path, capsys):
     assert "LANGSTAGE_AGENT_SPEC" in capsys.readouterr().out
 
 
+def test_show_config_survives_cp1252_stdout_with_non_latin1_value(tmp_path):
+    # gh #42: on a cp1252 (strict) stdout — a Western-Windows console, or the pipe the
+    # VS Code extension spawns the sidecar on — a resolved value with a non-Latin-1 char
+    # made `print(cfg.describe(...))` crash with UnicodeEncodeError and emit nothing.
+    # Driven as a subprocess with PYTHONIOENCODING=cp1252 (mirrors that stdout).
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp1252"
+    env["LANGSTAGE_AGENT_SPEC"] = "app_日本.py:graph"  # CJK -> not cp1252-encodable
+    env["LANGSTAGE_CONFIG_HOME"] = str(tmp_path)  # no stray real config
+    proc = subprocess.run(
+        [sys.executable, "-m", "langstage_vscode", "--show-config"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "UnicodeEncodeError" not in proc.stderr
+    # the report is emitted; the unrepresentable chars degrade to escapes, not a crash
+    assert "agent_spec" in proc.stdout
+    assert "\\u65e5" in proc.stdout
+
+
 def test_main_accepts_short_agent_flag(monkeypatch, tmp_path, capsys):
     # gh dogfood-F9: cli uses `-a`; the sidecar accepts it too (was --agent only), so
     # the same spec + flag work across surfaces.
