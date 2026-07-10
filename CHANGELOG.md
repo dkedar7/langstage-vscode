@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.11] - 2026-07-10
+
+### Added
+- **A one-shot `--message` / `--prompt` flag: drive a single turn and print the reply,
+  without hand-crafting NDJSON (gh #48).** `--selfcheck` validates the runtime with a fixed
+  internal ping and prints only an `OK:`/`FAIL:` verdict; the only way to see your agent's
+  actual answer to a prompt of your choosing was to drive the stdio protocol by hand
+  (`printf '{"type":"message",...}' '{"type":"shutdown"}' | python -m langstage_vscode ...`).
+  `langstage-vscode-sidecar --agent ./my.py:graph --message "summarize the repo"` now loads
+  the agent, drives one turn, prints the **assembled reply**, and exits `0` (clean) /
+  non-zero (on an error frame) — no `shutdown` handshake. Pair with `--json` to emit the raw
+  `event_to_dict` frames instead, for scripting. Honors the same config chain and
+  `--workspace` as a normal run; internally it's the same `run()` loop `--selfcheck` uses.
+
 ## [0.5.10] - 2026-07-09
 
 ### Fixed

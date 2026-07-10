@@ -114,6 +114,17 @@ langstage-vscode-sidecar --selfcheck                       # validate the runtim
 langstage-vscode-sidecar --selfcheck --agent ./my.py:graph # validate the configured agent
 ```
 
+`--selfcheck` answers "is the runtime healthy?"; **`--message`** answers "what does my
+agent actually *say*?" — it drives one turn with your prompt and prints the reply, then
+exits (no NDJSON + `shutdown` to hand-craft). Add `--json` to get the raw event frames
+instead of the assembled text:
+
+```bash
+langstage-vscode-sidecar --demo --message "hello"                       # prints the reply
+langstage-vscode-sidecar --agent ./my.py:graph --message "summarize the repo"
+langstage-vscode-sidecar --agent ./my.py:graph --message "hi" --json    # raw event frames
+```
+
 Your agent is any LangGraph `CompiledGraph` (e.g. from `deepagents`), exported
 under the name in the spec:
 
