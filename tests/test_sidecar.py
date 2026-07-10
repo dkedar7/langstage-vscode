@@ -137,6 +137,43 @@ def test_graph_error_surfaced():
     assert err and "kaboom" in err[-1]["error"]
 
 
+def _factory_fn():
+    """A FACTORY function, not a compiled graph — the gh #46 footgun (spec points at
+    the builder instead of the compiled `module:graph` attribute)."""
+    def make_graph():
+        b = StateGraph(MessagesState)
+        b.add_node("n", lambda s: s)
+        b.add_edge(START, "n")
+        b.add_edge("n", END)
+        return b.compile()
+
+    return make_graph
+
+
+def test_non_graph_spec_emits_error_frame_not_crash():
+    # gh #46: a spec that loads a non-runnable object (a factory fn, a bare value) used
+    # to crash the sidecar with a raw AttributeError right after `ready`, with nothing on
+    # the protocol stream. It must degrade to an actionable `error` frame instead.
+    events = drive(_factory_fn(), [{"type": "message", "content": "hi"}, {"type": "shutdown"}])
+    assert events[0] == {"type": "ready"}  # ready still emitted first
+    err = [e for e in events if e["type"] == "error"]
+    assert err, "expected an error frame for a non-runnable graph, not a crash"
+    assert "not a runnable graph" in err[-1]["error"]
+    assert "function" in err[-1]["error"]  # names what it actually loaded
+
+
+def test_non_graph_spec_error_names_the_spec():
+    # On the real runtime path run() gets the spec, so the message names it — matching
+    # the actionable message --selfcheck gives (shared via _runnable_graph_error).
+    stdin = io.StringIO(json.dumps({"type": "shutdown"}) + "\n")
+    stdout = io.StringIO()
+    run(42, stdin, stdout, spec="./x.py:make_graph")  # a bare int is not a graph
+    events = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+    err = [e for e in events if e["type"] == "error"]
+    assert err and "./x.py:make_graph" in err[-1]["error"]
+    assert "int" in err[-1]["error"]
+
+
 # ── main(): config resolution + --demo / --show-config ───────────────
 
 

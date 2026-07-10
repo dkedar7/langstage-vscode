@@ -31,11 +31,29 @@ from langstage_core import apply_workspace, load_agent_spec, workspace_root
 DEFAULT_MAX_RESULT_LEN = 50_000
 
 
+def _runnable_graph_error(graph: Any, spec: str | None = None) -> str | None:
+    """Return an actionable message if ``graph`` isn't a runnable CompiledGraph, else None.
+
+    The single source of the "not a runnable graph" message, shared by ``--selfcheck``
+    (preflight) and ``run()`` (the actual runtime path) so the two can't drift (gh #46).
+    A runnable graph exposes a callable ``.stream``; a factory function, a StateGraph that
+    was never compiled, or any non-graph value (``42``) does not.
+    """
+    if callable(getattr(graph, "stream", None)):
+        return None
+    label = f"agent spec {spec!r} " if spec else "the agent "
+    return (
+        f"{label}loaded a `{type(graph).__name__}`, not a runnable graph "
+        "(no `.stream`). Point the spec at the compiled graph attribute, e.g. `module:graph`."
+    )
+
+
 def run(
     graph: Any,
     stdin: Iterable[str],
     stdout: TextIO,
     *,
+    spec: str | None = None,
     max_result_len: int = DEFAULT_MAX_RESULT_LEN,
     **_legacy: Any,  # accepts + ignores the removed stream_mode/agui kwargs
 ) -> None:
@@ -52,12 +70,24 @@ def run(
 
     emit({"type": "ready"})
 
+    # The spec loaded, but if it isn't a runnable graph (a factory function, an
+    # uncompiled StateGraph, a bare value), core's build_agent blows up deep inside
+    # ag-ui with a raw `AttributeError: 'function' object has no attribute 'nodes'`
+    # that ISN'T a RuntimeError — so it used to escape the handler below and kill the
+    # process right after `ready`, with no protocol `error` frame (gh #46). Guard here
+    # with the same actionable message `--selfcheck` gives, so the runtime path
+    # degrades to a frame instead of a crash on this documented footgun.
+    graph_error = _runnable_graph_error(graph, spec)
+    if graph_error is not None:
+        emit({"type": "error", "error": graph_error})
+        return
+
     from .agui_stream import build_session_agent
 
     try:
         agui_agent = build_session_agent(graph)
-    except RuntimeError as exc:
-        emit({"type": "error", "error": str(exc)})
+    except Exception as exc:  # noqa: BLE001 — any build failure becomes an error frame, not a crash
+        emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
         return
 
     for raw in stdin:
@@ -176,13 +206,10 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
 
     # 2. Runnable check — the sharp case: it loaded, but it isn't a CompiledGraph.
     # Name the spec and what it actually loaded instead of deferring to a
-    # first-message AttributeError.
-    if not callable(getattr(graph, "stream", None)):
-        return verdict(
-            False,
-            f"agent spec {spec!r} loaded a `{type(graph).__name__}`, not a runnable graph "
-            "(no `.stream`). Point the spec at the compiled graph attribute, e.g. `module:graph`.",
-        )
+    # first-message AttributeError. Shares the message with the runtime path (gh #46).
+    runnable_error = _runnable_graph_error(graph, spec)
+    if runnable_error is not None:
+        return verdict(False, runnable_error)
 
     # 3. Drive one real turn through the actual command loop and assert the
     # documented terminal sequence (ready -> ack -> content... -> complete ->
@@ -331,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     # workspace instead of the launch cwd, matching cli. Single-process, single-agent.
     os.chdir(workspace_root())
 
-    run(graph, sys.stdin, sys.stdout)
+    run(graph, sys.stdin, sys.stdout, spec=spec)
     return 0
 
 
