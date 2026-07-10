@@ -239,6 +239,44 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     )
 
 
+def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> int:
+    """Drive exactly ONE turn with ``message`` and print the result, then exit — no
+    ``shutdown`` handshake required from the caller (gh #48).
+
+    Human mode prints the assembled assistant reply (the concatenated ``content``
+    frames); ``--json`` emits the raw ``event_to_dict`` frames (one per line) for
+    scripting. Exit 0 on a clean turn, non-zero if an ``error`` frame appears — the
+    same contract the stdio loop's ``error`` frame carries. Internally this is just the
+    ``run()`` loop fed an in-memory ``[message, shutdown]`` script, like ``_selfcheck``.
+    """
+    import io
+    import sys
+
+    commands = [
+        json.dumps({"type": "message", "session_id": "once", "content": message}),
+        json.dumps({"type": "shutdown"}),
+    ]
+    out = io.StringIO()
+    run(graph, iter(commands), out, spec=spec)
+    frames = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+
+    errors = [f.get("error") for f in frames if f.get("type") == "error"]
+
+    if as_json:
+        for frame in frames:
+            sys.stdout.write(json.dumps(frame) + "\n")
+        sys.stdout.flush()
+    else:
+        reply = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
+        if reply:
+            print(reply)
+        # Keep stdout the clean reply channel; surface why the turn failed on stderr.
+        for err in errors:
+            sys.stderr.write(f"error: {err}\n")
+
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
@@ -277,9 +315,20 @@ def main(argv: list[str] | None = None) -> int:
         "graph, drive one turn, and exit 0 (healthy) / non-zero. Does not enter the command loop.",
     )
     parser.add_argument(
+        "--message",
+        "--prompt",
+        default=None,
+        dest="message",
+        metavar="TEXT",
+        help="One-shot: drive a single turn with TEXT, print the agent's reply, and exit "
+        "(0 on success / non-zero on an error frame) with no stdio protocol handshake. "
+        "Pair with --json to emit the raw event frames instead of the assembled text.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
-        help="With --selfcheck, emit a machine-readable JSON verdict instead of a human-readable line.",
+        help="With --selfcheck, emit a machine-readable JSON verdict; with --message, emit the "
+        "raw event_to_dict frames (one per line) instead of the assembled reply text.",
     )
     from langstage_vscode import __version__
 
@@ -357,6 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     # cli gh #30) — so a bring-your-own agent's raw relative file writes land in the
     # workspace instead of the launch cwd, matching cli. Single-process, single-agent.
     os.chdir(workspace_root())
+
+    # One-shot: drive a single turn and print the reply, then exit — no interactive
+    # command loop, no caller-crafted NDJSON + shutdown line (gh #48).
+    if args.message is not None:
+        return _run_once(graph, args.message, spec=spec, as_json=args.json)
 
     run(graph, sys.stdin, sys.stdout, spec=spec)
     return 0

@@ -439,3 +439,39 @@ def test_main_operates_from_workspace_cwd(monkeypatch, tmp_path):
     rc = main(["--agent", "langstage_core.demo.stub:graph", "--workspace", str(ws)])
     assert rc == 0
     assert Path(os.getcwd()).resolve() == ws.resolve()
+
+
+# ── one-shot --message (gh #48) ──────────────────────────────────────
+
+
+def test_main_message_prints_assembled_reply(monkeypatch, tmp_path, capsys):
+    # gh #48: --message drives ONE turn and prints the agent's reply, exit 0, with no
+    # caller-crafted NDJSON + shutdown handshake.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--message", "hello there"]) == 0
+    out = capsys.readouterr().out
+    assert "You said: hello there" in out
+    assert '"type"' not in out  # human mode prints text, not raw protocol frames
+
+
+def test_main_message_json_emits_raw_frames(monkeypatch, tmp_path, capsys):
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--message", "hi", "--json"]) == 0
+    frames = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    types = [f.get("type") for f in frames]
+    assert "content" in types and "complete" in types
+    text = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
+    assert "hi" in text
+
+
+def test_main_message_nonrunnable_spec_exits_1_with_clean_stdout(monkeypatch, tmp_path, capsys):
+    # A loads-but-not-runnable spec: exit 1, the actionable #46 message on stderr, and
+    # stdout stays the clean reply channel (empty) — reuses run()'s runnable guard.
+    _isolate_config(monkeypatch, tmp_path)
+    agent = tmp_path / "factory.py"
+    agent.write_text("def make_graph():\n    pass\n")
+    monkeypatch.setenv("LANGSTAGE_AGENT_SPEC", f"{agent}:make_graph")
+    assert main(["--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert "not a runnable graph" in captured.err
