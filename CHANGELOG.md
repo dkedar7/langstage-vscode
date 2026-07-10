@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.10] - 2026-07-09
+
+### Fixed
+- **A spec that loads a non-runnable object crashed the sidecar with no `error` frame
+  (gh #46).** When `--agent <spec>` loaded successfully but resolved to something that
+  isn't a runnable `CompiledGraph` (a factory function, an uncompiled `StateGraph`, a bare
+  value), the sidecar emitted `{"type": "ready"}` and then died with an uncaught
+  `AttributeError` from deep inside `ag-ui` — never emitting the documented
+  `{"type": "error", ...}` frame the extension keys off. The runtime path now applies the
+  same runnable-graph guard `--selfcheck` already uses, before building the agent, and
+  surfaces the identical actionable message (`... not a runnable graph (no `.stream`).
+  Point the spec at the compiled graph attribute, e.g. `module:graph`.`). The check is
+  factored into one helper shared by both paths so they can't drift, and the agent-build
+  `except` was broadened so any build failure becomes an `error` frame instead of a crash.
+
 ## [0.5.9] - 2026-07-08
 
 ### Fixed
