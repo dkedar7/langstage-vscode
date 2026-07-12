@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.13] - 2026-07-12
+
+### Changed
+- **One-shot `--message` now streams its output frame-by-frame instead of buffering the
+  whole turn (gh #50).** `_run_once` used to run the entire `run()` loop into an in-memory
+  `StringIO`, drain the whole turn, and only then print the assembled reply (or, with
+  `--json`, replay all the buffered frames) — so on a slow or token-streaming agent the
+  terminal looked frozen for the full turn, then dumped everything at once, and
+  `--message ... --json | jq` saw nothing until the end. It now writes to a small streaming
+  sink handed to `run()` in place of the buffer: human mode types each `content` frame's text
+  out live (no trailing newline until the turn ends), and `--json` forwards each
+  `event_to_dict` frame the instant it's emitted (error frames included) — a genuine
+  streaming NDJSON source. The flag's contract is unchanged: stdout stays the clean reply
+  channel, `error` frames go to stderr in human mode, and the exit code is still `0` on a
+  clean turn / non-zero on an `error` frame. The cp1252-safe reply handling from gh #51 is
+  preserved (every write still routes through `_write_safe`).
+
+## [0.5.12] - 2026-07-12
+
+### Fixed
+- **One-shot `--message` no longer crashes on a cp1252 stdout when the agent's reply
+  contains a non-Latin-1 character (gh #51).** The `--message` human-mode path printed the
+  assembled reply with a bare `print(reply)`, so on a cp1252 (strict) stdout — a Western-
+  Windows console, and the pipe the VS Code extension spawns the sidecar on — any reply with
+  a character outside cp1252 (a ✅/CJK/emoji an LLM emits routinely) died with an uncaught
+  `UnicodeEncodeError` and a full traceback, losing the reply and exiting `1`. This is the
+  same bug class already fixed for `--show-config` in gh #42, whose guard was never applied to
+  the newer `--message` path (added in 0.5.11). Both raw-text stdout paths — plus the
+  `--message` error-frame writes to stderr, which `PYTHONIOENCODING=cp1252` makes strict too —
+  now route through one shared `_write_safe` helper that degrades unrepresentable characters
+  to backslash escapes instead of crashing (full fidelity is preserved on a UTF-8 stream), so
+  the two guards can't drift again.
+
 ## [0.5.11] - 2026-07-10
 
 ### Added

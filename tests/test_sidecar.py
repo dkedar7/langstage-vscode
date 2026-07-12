@@ -464,6 +464,135 @@ def test_main_message_json_emits_raw_frames(monkeypatch, tmp_path, capsys):
     assert "hi" in text
 
 
+# ── streaming --message (gh #50) ─────────────────────────────────────
+
+
+def test_oneshot_sink_human_streams_content_incrementally():
+    # gh #50: the sink must forward each `content` frame to stdout the instant it
+    # arrives (not buffer the whole turn) — asserted by checking stdout already holds
+    # the text BEFORE the terminal frames are fed.
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=False)
+
+    sink.write(json.dumps({"type": "content", "content": "Hello "}) + "\n")
+    assert out.getvalue() == "Hello "  # visible before any complete/turn_end
+    sink.write(json.dumps({"type": "content", "content": "world"}) + "\n")
+    assert out.getvalue() == "Hello world"
+    sink.write(json.dumps({"type": "complete"}) + "\n")
+    sink.write(json.dumps({"type": "turn_end", "session_id": "once"}) + "\n")
+    sink.close_reply()
+
+    assert out.getvalue() == "Hello world\n"  # trailing newline closes the live reply
+    assert err.getvalue() == ""  # human mode: no protocol noise on stderr
+    assert sink.saw_error is False
+
+
+def test_oneshot_sink_json_streams_each_frame_verbatim():
+    # gh #50: in --json mode every frame (error frames included) is forwarded to
+    # stdout the instant it's emitted, as a genuine streaming NDJSON source.
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=True)
+
+    sink.write(json.dumps({"type": "content", "content": "hi"}) + "\n")
+    assert json.loads(out.getvalue().strip()) == {"type": "content", "content": "hi"}
+    sink.write(json.dumps({"type": "error", "error": "boom"}) + "\n")
+
+    frames = [json.loads(ln) for ln in out.getvalue().splitlines() if ln.strip()]
+    assert any(f.get("type") == "error" for f in frames)  # error rides the stdout stream
+    assert sink.saw_error is True
+    assert err.getvalue() == ""  # --json keeps everything on the one NDJSON channel
+
+
+def test_oneshot_sink_human_routes_error_to_stderr():
+    # Human mode keeps stdout the clean reply channel and surfaces the failure on
+    # stderr, and still flags saw_error for the exit code — the gh #48 contract.
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=False)
+
+    sink.write(json.dumps({"type": "error", "error": "kaboom"}) + "\n")
+    sink.close_reply()
+
+    assert out.getvalue() == ""  # nothing on stdout
+    assert "error: kaboom" in err.getvalue()
+    assert sink.saw_error is True
+
+
+def test_oneshot_sink_reassembles_frame_split_across_writes():
+    # Defensive: even if a frame were delivered in two write() calls, buffering on the
+    # newline boundary must reassemble it rather than mis-parse a partial line.
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=False)
+    frame = json.dumps({"type": "content", "content": "abc"})
+    sink.write(frame[:5])
+    assert out.getvalue() == ""  # partial line: nothing emitted yet
+    sink.write(frame[5:] + "\n")
+    assert out.getvalue() == "abc"
+
+
+def test_main_message_streams_frame_by_frame_not_buffered(monkeypatch, tmp_path):
+    # gh #50 end-to-end: --message must stream each content frame to the REAL stdout as
+    # it arrives, not buffer the turn and dump it once. The demo stub emits its reply
+    # across several content frames, so a streaming path writes it in multiple pieces,
+    # whereas the old buffered path emitted the whole reply in a single write.
+    _isolate_config(monkeypatch, tmp_path)
+
+    class RecordingOut:
+        encoding = "utf-8"
+
+        def __init__(self):
+            self.writes = []
+
+        def write(self, s):
+            self.writes.append(s)
+
+        def flush(self):
+            pass
+
+    rec = RecordingOut()
+    monkeypatch.setattr("sys.stdout", rec)
+    assert main(["--demo", "--message", "hello there"]) == 0
+
+    joined = "".join(rec.writes)
+    content_writes = [w for w in rec.writes if w.strip()]
+    assert len(content_writes) >= 2, rec.writes  # reply arrived in pieces, not one blob
+    assert "hello there" in joined
+    assert joined.endswith("\n")  # the live reply is closed off with a trailing newline
+
+
+def test_message_human_survives_cp1252_stdout_with_non_latin1_reply(tmp_path):
+    # gh #51: on a cp1252 (strict) stdout — a Western-Windows console, or the pipe the
+    # VS Code extension spawns the sidecar on — a reply with a non-Latin-1 char (an
+    # emoji/CJK char an LLM emits routinely) made the one-shot --message `print(reply)`
+    # crash with UnicodeEncodeError and emit nothing (gh #42's --show-config fix was
+    # never applied to this newer path). Driven as a subprocess with
+    # PYTHONIOENCODING=cp1252, mirroring the #42 test. The demo stub echoes the prompt,
+    # so a ✅ in the prompt rides straight into the assembled reply.
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp1252"
+    env["LANGSTAGE_CONFIG_HOME"] = str(tmp_path)  # no stray real config
+    proc = subprocess.run(
+        [sys.executable, "-m", "langstage_vscode", "--demo", "--message", "build ✅ done"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "UnicodeEncodeError" not in proc.stderr
+    # the reply is emitted; the unrepresentable char degrades to an escape, not a crash
+    assert "You said: build" in proc.stdout
+    assert "\\u2705" in proc.stdout
+
+
 def test_main_message_nonrunnable_spec_exits_1_with_clean_stdout(monkeypatch, tmp_path, capsys):
     # A loads-but-not-runnable spec: exit 1, the actionable #46 message on stderr, and
     # stdout stays the clean reply channel (empty) — reuses run()'s runnable guard.
