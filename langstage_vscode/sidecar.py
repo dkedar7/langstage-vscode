@@ -31,6 +31,25 @@ from langstage_core import apply_workspace, load_agent_spec, workspace_root
 DEFAULT_MAX_RESULT_LEN = 50_000
 
 
+def _write_safe(stream: TextIO, text: str) -> None:
+    """Write ``text`` to ``stream``, degrading any character the stream's encoding
+    can't represent to a backslash escape instead of crashing.
+
+    The VS Code extension spawns the sidecar over a cp1252 pipe (and a Western-
+    Windows console is cp1252 too), both with the ``strict`` error handler — so a
+    raw ``print`` of text carrying a non-Latin-1 character (an emoji/CJK char an LLM
+    emits routinely; a CJK/Cyrillic agent spec or project path) dies with an
+    uncaught ``UnicodeEncodeError`` and emits nothing. Every human-readable text
+    path routes through here so it degrades gracefully; the JSON protocol path is
+    already ASCII-safe via ``ensure_ascii``. Full fidelity is preserved on a UTF-8
+    stream. Shared by ``--show-config`` (gh #42) and one-shot ``--message`` (gh #51)
+    so the two guards can't drift again — the "one shared helper" rationale gh #46
+    used for ``_runnable_graph_error``.
+    """
+    enc = getattr(stream, "encoding", None) or "utf-8"
+    stream.write(text.encode(enc, "backslashreplace").decode(enc, "replace"))
+
+
 def _runnable_graph_error(graph: Any, spec: str | None = None) -> str | None:
     """Return an actionable message if ``graph`` isn't a runnable CompiledGraph, else None.
 
@@ -269,10 +288,15 @@ def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> i
     else:
         reply = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
         if reply:
-            print(reply)
-        # Keep stdout the clean reply channel; surface why the turn failed on stderr.
+            # cp1252-safe: a non-Latin-1 char in the reply (an emoji/CJK char an LLM
+            # emits routinely) must degrade to an escape, not crash the print — the
+            # same guard --show-config already uses (gh #51; #42's fix wasn't here).
+            _write_safe(sys.stdout, reply + "\n")
+        # Keep stdout the clean reply channel; surface why the turn failed on stderr
+        # (also cp1252-safe: an error frame's text can carry a non-Latin-1 char, and
+        # PYTHONIOENCODING=cp1252 makes stderr strict too).
         for err in errors:
-            sys.stderr.write(f"error: {err}\n")
+            _write_safe(sys.stderr, f"error: {err}\n")
 
     return 1 if errors else 0
 
@@ -359,14 +383,12 @@ def main(argv: list[str] | None = None) -> int:
         # Hide them so --show-config only advertises what the sidecar honors
         # (agent_spec, workspace_root). (gh #14)
         text = cfg.describe(omit_keys=["host", "port", "debug", "title"])
-        # The VS Code extension spawns the sidecar with a cp1252 pipe (and a Western-
-        # Windows console is cp1252 too), both with the `strict` error handler — so a
-        # resolved value with a non-Latin-1 char (a CJK/Cyrillic agent spec or project
-        # path) made this raw-text print crash with UnicodeEncodeError and emit nothing.
-        # The protocol path is already ASCII-safe (ensure_ascii); make this one robust
-        # too by degrading unrepresentable chars to escapes instead of crashing. (gh #42)
-        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-        print(text.encode(enc, "backslashreplace").decode(enc, "replace"))
+        # A resolved value with a non-Latin-1 char (a CJK/Cyrillic agent spec or
+        # project path) made this raw-text print crash with UnicodeEncodeError on the
+        # cp1252 (strict) stdout the extension spawns the sidecar on, emitting nothing.
+        # Degrade unrepresentable chars to escapes via the shared cp1252-safe writer
+        # instead of crashing (gh #42; shared with --message so they can't drift, #51).
+        _write_safe(sys.stdout, text + "\n")
         return 0
 
     def fail(msg: str) -> int:

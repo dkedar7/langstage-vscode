@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.12] - 2026-07-12
+
+### Fixed
+- **One-shot `--message` no longer crashes on a cp1252 stdout when the agent's reply
+  contains a non-Latin-1 character (gh #51).** The `--message` human-mode path printed the
+  assembled reply with a bare `print(reply)`, so on a cp1252 (strict) stdout — a Western-
+  Windows console, and the pipe the VS Code extension spawns the sidecar on — any reply with
+  a character outside cp1252 (a ✅/CJK/emoji an LLM emits routinely) died with an uncaught
+  `UnicodeEncodeError` and a full traceback, losing the reply and exiting `1`. This is the
+  same bug class already fixed for `--show-config` in gh #42, whose guard was never applied to
+  the newer `--message` path (added in 0.5.11). Both raw-text stdout paths — plus the
+  `--message` error-frame writes to stderr, which `PYTHONIOENCODING=cp1252` makes strict too —
+  now route through one shared `_write_safe` helper that degrades unrepresentable characters
+  to backslash escapes instead of crashing (full fidelity is preserved on a UTF-8 stream), so
+  the two guards can't drift again.
+
 ## [0.5.11] - 2026-07-10
 
 ### Added

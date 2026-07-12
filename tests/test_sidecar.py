@@ -464,6 +464,32 @@ def test_main_message_json_emits_raw_frames(monkeypatch, tmp_path, capsys):
     assert "hi" in text
 
 
+def test_message_human_survives_cp1252_stdout_with_non_latin1_reply(tmp_path):
+    # gh #51: on a cp1252 (strict) stdout — a Western-Windows console, or the pipe the
+    # VS Code extension spawns the sidecar on — a reply with a non-Latin-1 char (an
+    # emoji/CJK char an LLM emits routinely) made the one-shot --message `print(reply)`
+    # crash with UnicodeEncodeError and emit nothing (gh #42's --show-config fix was
+    # never applied to this newer path). Driven as a subprocess with
+    # PYTHONIOENCODING=cp1252, mirroring the #42 test. The demo stub echoes the prompt,
+    # so a ✅ in the prompt rides straight into the assembled reply.
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp1252"
+    env["LANGSTAGE_CONFIG_HOME"] = str(tmp_path)  # no stray real config
+    proc = subprocess.run(
+        [sys.executable, "-m", "langstage_vscode", "--demo", "--message", "build ✅ done"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "UnicodeEncodeError" not in proc.stderr
+    # the reply is emitted; the unrepresentable char degrades to an escape, not a crash
+    assert "You said: build" in proc.stdout
+    assert "\\u2705" in proc.stdout
+
+
 def test_main_message_nonrunnable_spec_exits_1_with_clean_stdout(monkeypatch, tmp_path, capsys):
     # A loads-but-not-runnable spec: exit 1, the actionable #46 message on stderr, and
     # stdout stays the clean reply channel (empty) — reuses run()'s runnable guard.
