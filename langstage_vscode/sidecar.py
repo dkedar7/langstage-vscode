@@ -258,47 +258,110 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     )
 
 
+class _OneShotSink:
+    """A write-only NDJSON sink handed to ``run()`` in place of an in-memory
+    ``StringIO`` buffer, so a one-shot ``--message`` turn streams to the real stdout
+    frame-by-frame instead of buffering the whole turn and dumping it at the end
+    (gh #50).
+
+    ``run()`` writes one ``event_to_dict`` frame per line (and ``flush()``es after
+    each); this sink forwards them the instant they arrive:
+
+    - ``--json``: write every frame to stdout as it's emitted (error frames included,
+      matching the buffered contract) — a genuine streaming NDJSON source, so
+      ``... --message x --json | jq -c .`` sees frames live instead of all at once.
+    - human mode: print each ``content`` frame's text as it arrives (the reply types
+      out live, with no trailing newline until the turn ends), routing ``error``
+      frames to stderr and keeping stdout the clean reply channel.
+
+    Either way it records whether any ``error`` frame appeared, for the ``0`` clean /
+    non-zero on error exit contract ``--message`` has carried since gh #48. Every
+    write goes through ``_write_safe``, so a non-Latin-1 char in the reply still
+    degrades to an escape on a cp1252 stdout instead of crashing (gh #51 holds after
+    the switch to streaming).
+    """
+
+    def __init__(self, out: TextIO, err: TextIO, *, as_json: bool) -> None:
+        self._out = out
+        self._err = err
+        self._as_json = as_json
+        self._buf = ""
+        self.saw_error = False
+        self.printed_reply = False
+
+    def write(self, s: str) -> None:
+        # run()'s emit() writes each frame as a single "<json>\n", but buffer and
+        # split on newlines so a coalesced or partial write can't split a frame.
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.strip()
+            if line:
+                self._on_frame(line)
+
+    def flush(self) -> None:
+        self._out.flush()
+
+    def _on_frame(self, line: str) -> None:
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        ftype = frame.get("type")
+        if ftype == "error":
+            self.saw_error = True
+
+        if self._as_json:
+            # Forward the frame verbatim (run() emitted it via json.dumps, so it's
+            # already ASCII-safe), flushing so a piped consumer sees it immediately.
+            _write_safe(self._out, line + "\n")
+            self._out.flush()
+            return
+
+        if ftype == "content":
+            text = frame.get("content", "")
+            if text:
+                _write_safe(self._out, text)
+                self._out.flush()
+                self.printed_reply = True
+        elif ftype == "error":
+            # stdout stays the clean reply channel; surface the failure on stderr.
+            _write_safe(self._err, f"error: {frame.get('error', '')}\n")
+
+    def close_reply(self) -> None:
+        """Terminate a live human-mode reply with the trailing newline the old
+        ``print(reply)`` added, so the shell prompt returns on its own line. No-op in
+        ``--json`` mode and when the turn produced no ``content``."""
+        if self.printed_reply:
+            _write_safe(self._out, "\n")
+            self._out.flush()
+
+
 def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> int:
-    """Drive exactly ONE turn with ``message`` and print the result, then exit — no
+    """Drive exactly ONE turn with ``message`` and stream the result, then exit — no
     ``shutdown`` handshake required from the caller (gh #48).
 
-    Human mode prints the assembled assistant reply (the concatenated ``content``
-    frames); ``--json`` emits the raw ``event_to_dict`` frames (one per line) for
-    scripting. Exit 0 on a clean turn, non-zero if an ``error`` frame appears — the
-    same contract the stdio loop's ``error`` frame carries. Internally this is just the
-    ``run()`` loop fed an in-memory ``[message, shutdown]`` script, like ``_selfcheck``.
+    Human mode types out the assistant reply (the ``content`` frames) as it's
+    produced; ``--json`` streams the raw ``event_to_dict`` frames (one per line) for
+    scripting. Both stream frame-by-frame as ``run()`` emits them rather than
+    buffering the whole turn and dumping it at the end (gh #50) — so a slow or
+    token-streaming agent no longer looks frozen. Exit 0 on a clean turn, non-zero if
+    an ``error`` frame appears — the same contract the stdio loop's ``error`` frame
+    carries. Internally this is the ``run()`` loop fed an in-memory
+    ``[message, shutdown]`` script (like ``_selfcheck``), but writing to a streaming
+    sink instead of a ``StringIO`` buffer.
     """
-    import io
     import sys
 
     commands = [
         json.dumps({"type": "message", "session_id": "once", "content": message}),
         json.dumps({"type": "shutdown"}),
     ]
-    out = io.StringIO()
-    run(graph, iter(commands), out, spec=spec)
-    frames = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    sink = _OneShotSink(sys.stdout, sys.stderr, as_json=as_json)
+    run(graph, iter(commands), sink, spec=spec)
+    sink.close_reply()  # human mode: close the streamed reply with a trailing newline
 
-    errors = [f.get("error") for f in frames if f.get("type") == "error"]
-
-    if as_json:
-        for frame in frames:
-            sys.stdout.write(json.dumps(frame) + "\n")
-        sys.stdout.flush()
-    else:
-        reply = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
-        if reply:
-            # cp1252-safe: a non-Latin-1 char in the reply (an emoji/CJK char an LLM
-            # emits routinely) must degrade to an escape, not crash the print — the
-            # same guard --show-config already uses (gh #51; #42's fix wasn't here).
-            _write_safe(sys.stdout, reply + "\n")
-        # Keep stdout the clean reply channel; surface why the turn failed on stderr
-        # (also cp1252-safe: an error frame's text can carry a non-Latin-1 char, and
-        # PYTHONIOENCODING=cp1252 makes stderr strict too).
-        for err in errors:
-            _write_safe(sys.stderr, f"error: {err}\n")
-
-    return 1 if errors else 0
+    return 1 if sink.saw_error else 0
 
 
 def main(argv: list[str] | None = None) -> int:

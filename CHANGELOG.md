@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.13] - 2026-07-12
+
+### Changed
+- **One-shot `--message` now streams its output frame-by-frame instead of buffering the
+  whole turn (gh #50).** `_run_once` used to run the entire `run()` loop into an in-memory
+  `StringIO`, drain the whole turn, and only then print the assembled reply (or, with
+  `--json`, replay all the buffered frames) — so on a slow or token-streaming agent the
+  terminal looked frozen for the full turn, then dumped everything at once, and
+  `--message ... --json | jq` saw nothing until the end. It now writes to a small streaming
+  sink handed to `run()` in place of the buffer: human mode types each `content` frame's text
+  out live (no trailing newline until the turn ends), and `--json` forwards each
+  `event_to_dict` frame the instant it's emitted (error frames included) — a genuine
+  streaming NDJSON source. The flag's contract is unchanged: stdout stays the clean reply
+  channel, `error` frames go to stderr in human mode, and the exit code is still `0` on a
+  clean turn / non-zero on an `error` frame. The cp1252-safe reply handling from gh #51 is
+  preserved (every write still routes through `_write_safe`).
+
 ## [0.5.12] - 2026-07-12
 
 ### Fixed
