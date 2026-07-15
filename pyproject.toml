@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.5.13"
+version = "0.5.14"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 license = "MIT"
 requires-python = ">=3.11"

@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.14] - 2026-07-14
+
+### Fixed
+- **The VS Code extension now keeps one sidecar process alive per conversation, so the
+  documented multi-turn "conversational memory" actually holds (gh #54).** The extension
+  spawned a **brand-new sidecar process for every `@langstage` message and killed it after
+  one turn** (`extension/src/extension.ts`: `spawn(...)` per message, `proc.kill()` in the
+  `finally`). An **in-process** checkpointer — `MemorySaver`, the one the README's memory
+  note points at with `graph.compile(checkpointer=...)`, and the one virtually every
+  LangGraph/`deepagents` example uses — lives inside that process, so it was wiped between
+  turns: the agent had amnesia on turn 2 even though it was compiled with a checkpointer and
+  the extension sent the same `session_id: 'vscode'` every time. The extension now spawns the
+  sidecar on the first message of a conversation and **reuses that same long-lived process**
+  (same `session_id` → same LangGraph `thread_id`) for every following turn, so an in-process
+  `MemorySaver` persists across turns in chat. The process is restarted on a config change
+  (`langstage.pythonPath` / `langstage.agentSpec`) and when a new conversation begins (so a
+  fresh chat starts with a clean thread), and is torn down on deactivate. As a bonus this also
+  removes the per-turn cold start (interpreter boot + agent import + AG-UI build) the old
+  spawn-per-message path paid on every message. A turn cancellation kills the process (the
+  stdio protocol has no per-turn cancel command) and the next turn respawns a fresh one.
+  Tests lock the underlying sidecar contract: a checkpointer-backed agent driven through one
+  persistent `run()` loop remembers prior turns (turn 2 sees turn 1's history), while a fresh
+  checkpointer per turn — the old spawn-per-message shape — forgets. The README memory note is
+  updated to describe the extension's long-lived process instead of implying an in-process
+  checkpointer "just works" in chat.
+
 ## [0.5.13] - 2026-07-12
 
 ### Changed
