@@ -337,6 +337,133 @@ class _OneShotSink:
             self._out.flush()
 
 
+# Lines that end the interactive --repl session. `:quit` is the documented one
+# (see the flag help + README); `:q`/`:exit` are conventional REPL aliases accepted
+# for muscle memory. A bare EOF (Ctrl-D / closed stdin) ends the session too.
+_REPL_QUIT = frozenset({":quit", ":q", ":exit"})
+
+
+class _ReplSink(_OneShotSink):
+    """The multi-turn sink for interactive ``--repl``.
+
+    ``--repl`` feeds ``run()`` one ``message`` command per input line and lets the
+    SAME ``run()`` loop stay alive across turns — so a checkpointer-backed agent's
+    memory persists (gh #54's invariant). This sink reuses ``_OneShotSink``'s live
+    ``content`` rendering, ``error``-to-stderr routing, ``--json`` frame forwarding,
+    ``saw_error`` tracking, and cp1252-safe ``_write_safe`` writes verbatim — the
+    ONLY thing it adds is a per-turn boundary: ``run()`` emits ``turn_end`` after
+    every turn, so on each one (in human mode) it closes off the streamed reply with
+    the trailing newline ``_OneShotSink`` would otherwise add just once, and resets
+    for the next turn. In ``--json`` mode ``turn_end`` is forwarded verbatim like any
+    other frame (the base class already does that), so the raw NDJSON stream is
+    unbroken for a scripting consumer.
+    """
+
+    def __init__(self, out: TextIO, err: TextIO, *, as_json: bool) -> None:
+        super().__init__(out, err, as_json=as_json)
+        self.turns = 0  # number of turn_end boundaries seen (a driven turn ran)
+
+    def _on_frame(self, line: str) -> None:
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if frame.get("type") == "turn_end":
+            self.turns += 1
+            if not self._as_json:
+                # Close the finished reply (trailing newline iff it printed anything)
+                # and reset so the next turn streams onto its own line.
+                self.close_reply()
+                self.printed_reply = False
+                return
+        # Everything else — content, error, ready/ack/complete, and turn_end in
+        # --json mode — is handled exactly as the one-shot sink handles it.
+        super()._on_frame(line)
+
+
+def _run_repl(
+    graph: Any,
+    *,
+    spec: str | None,
+    as_json: bool,
+    stdin: Iterable[str] | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    session_id: str = "repl",
+    prompt: str = "> ",
+    show_prompt: bool | None = None,
+) -> int:
+    """Interactive multi-turn REPL: the conversational companion to one-shot
+    ``--message`` (gh #56).
+
+    Reads one prompt per input line, drives a turn, prints the assembled reply, and
+    loops until EOF (Ctrl-D) or a ``:quit`` line. Because every turn goes through a
+    single long-lived ``run()`` loop under one fixed ``session_id`` (hence one
+    ``thread_id``), a checkpointer-backed agent REMEMBERS prior turns — the exact
+    per-conversation shape the VS Code extension uses (gh #54), so it reproduces the
+    real memory semantics instead of the fresh-process-per-turn shape that hides
+    them. This is what makes the README's "does turn 2 remember turn 1?" caveat
+    verifiable from the CLI in ten seconds ("tell it your name, ask on the next
+    line").
+
+    It is a thin front-end over the existing machinery: each input line becomes a
+    ``{"type": "message", ...}`` command and EOF/``:quit`` becomes ``shutdown``, fed
+    lazily to ``run()``; the reply is rendered by ``_ReplSink`` (a ``_OneShotSink``
+    that also closes each turn's reply at ``turn_end``). Nothing about the turn,
+    streaming, or ``_write_safe`` plumbing is duplicated. ``--json`` composes with it
+    (raw ``event_to_dict`` frames instead of assembled text), same as ``--message``.
+
+    Exit 0 on a clean EOF/``:quit`` termination (per-turn ``error`` frames are
+    surfaced to stderr but don't fail the session — it's interactive, not one-shot);
+    non-zero only if the agent could not even start a turn (e.g. a non-runnable spec,
+    where ``run()`` emits an ``error`` and returns before any ``turn_end``).
+    """
+    import sys
+
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    if show_prompt is None:
+        # Only draw a prompt for a human at a real TTY, and never in --json mode
+        # (machine-readable output). Scripted/piped stdin gets a clean channel.
+        isatty = getattr(stdin, "isatty", None)
+        show_prompt = (not as_json) and bool(isatty and isatty())
+
+    lines = iter(stdin)
+
+    def commands() -> Iterable[str]:
+        """Translate REPL input lines into NDJSON commands for run(), lazily — so
+        the prompt for turn N+1 is drawn only after turn N's reply has streamed."""
+        while True:
+            if show_prompt:
+                _write_safe(stderr, prompt)
+                stderr.flush()
+            line = next(lines, None)
+            if line is None:  # EOF (Ctrl-D / closed stdin): end the session.
+                if show_prompt:
+                    _write_safe(stderr, "\n")  # move off the dangling prompt line
+                    stderr.flush()
+                yield json.dumps({"type": "shutdown"})
+                return
+            text = line.strip()
+            if not text:
+                continue  # blank line: re-prompt, don't drive an empty-content turn
+            if text in _REPL_QUIT:
+                yield json.dumps({"type": "shutdown"})
+                return
+            yield json.dumps(
+                {"type": "message", "session_id": session_id, "content": text}
+            )
+
+    sink = _ReplSink(stdout, stderr, as_json=as_json)
+    run(graph, commands(), sink, spec=spec)
+
+    # A pre-loop failure (e.g. a non-runnable spec) emits an error before any turn
+    # ran, so no turn_end was seen — treat that as a hard start failure (exit 1),
+    # mirroring --message. A clean session that merely had a bad turn exits 0.
+    return 1 if (sink.saw_error and sink.turns == 0) else 0
+
+
 def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> int:
     """Drive exactly ONE turn with ``message`` and stream the result, then exit — no
     ``shutdown`` handshake required from the caller (gh #48).
@@ -412,10 +539,19 @@ def main(argv: list[str] | None = None) -> int:
         "Pair with --json to emit the raw event frames instead of the assembled text.",
     )
     parser.add_argument(
+        "--repl",
+        action="store_true",
+        help="Interactive multi-turn REPL: read one prompt per line, drive a turn, print the "
+        "reply, and loop over ONE long-lived session (same session_id) so a checkpointer-backed "
+        "agent remembers prior turns. The multi-turn companion to --message; verifies "
+        "conversational memory from the CLI. Exit with EOF (Ctrl-D) or a ':quit' line. "
+        "Pair with --json for raw event frames.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
-        help="With --selfcheck, emit a machine-readable JSON verdict; with --message, emit the "
-        "raw event_to_dict frames (one per line) instead of the assembled reply text.",
+        help="With --selfcheck, emit a machine-readable JSON verdict; with --message or --repl, "
+        "emit the raw event_to_dict frames (one per line) instead of the assembled reply text.",
     )
     from langstage_vscode import __version__
 
@@ -465,6 +601,11 @@ def main(argv: list[str] | None = None) -> int:
             return fail("--demo and --agent are mutually exclusive")
         spec = DEMO_AGENT_SPEC
 
+    # --message is one-shot, --repl is multi-turn interactive; both drive turns but
+    # over different input models, so asking for both is a contradiction.
+    if args.repl and args.message is not None:
+        return fail("--repl and --message are mutually exclusive")
+
     if args.selfcheck:
         # With no agent configured, validate the runtime itself via the demo stub.
         return _selfcheck(spec or DEMO_AGENT_SPEC, cfg, as_json=args.json)
@@ -496,6 +637,12 @@ def main(argv: list[str] | None = None) -> int:
     # command loop, no caller-crafted NDJSON + shutdown line (gh #48).
     if args.message is not None:
         return _run_once(graph, args.message, spec=spec, as_json=args.json)
+
+    # Interactive multi-turn: read a prompt per line and drive turns over ONE
+    # long-lived session so a checkpointer-backed agent remembers prior turns —
+    # the conversational companion to --message (gh #56).
+    if args.repl:
+        return _run_repl(graph, spec=spec, as_json=args.json)
 
     run(graph, sys.stdin, sys.stdout, spec=spec)
     return 0

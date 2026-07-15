@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.15] - 2026-07-15
+
+### Added
+- **An interactive `--repl` mode: the multi-turn companion to one-shot `--message`, so you
+  can verify conversational memory straight from the CLI (gh #56).** The two turn-driving
+  flags were both strictly single-turn — `--selfcheck` drives one fixed internal ping, and
+  `--message` drives exactly one turn against a fresh `session_id: "once"` and exits — so the
+  one thing the README's longest note warns is subtle to get right (does turn 2 remember
+  turn 1?) had **no supported way to validate short of hand-writing the NDJSON protocol** and
+  keeping one process alive with matching `session_id`s. `langstage-vscode-sidecar --repl`
+  (or `--agent ./my.py:graph --repl`) now reads one prompt per input line, drives a turn, and
+  prints the reply, looping over **one long-lived session** (a single fixed `session_id` →
+  one LangGraph `thread_id` in one persistent `run()` loop) until EOF (Ctrl-D) or a `:quit`
+  line. Because the whole session shares one thread — the exact per-conversation shape the VS
+  Code extension uses (gh #54) — a checkpointer-backed agent **remembers prior turns**, making
+  the checkpointer footgun observable in ten seconds ("tell it your name, ask on the next
+  line"): against a `MemorySaver`-backed graph, `--repl` reports a rising message count across
+  turns where a fresh-process-per-call `--message` stays flat. It is a thin front-end over the
+  existing machinery — each input line becomes a `message` command and EOF/`:quit` becomes
+  `shutdown`, fed lazily to the same `run()` loop; the reply is rendered by a `_ReplSink` that
+  reuses one-shot `--message`'s live `content` streaming, `error`-to-stderr routing, and
+  cp1252-safe `_write_safe` writes, adding only a per-turn `turn_end` boundary. No new protocol
+  and no new rendering. `--json` composes with it (raw `event_to_dict` frames instead of
+  assembled text), same as `--message`; the `> ` prompt is drawn to stderr only at a real TTY
+  so stdout stays the clean reply channel and piped/scripted input isn't polluted. Blank input
+  lines re-prompt instead of driving an empty-content turn; `--repl` and `--message` are
+  mutually exclusive. Exit is `0` on a clean EOF/`:quit` termination (a per-turn `error` is
+  surfaced to stderr but doesn't fail the interactive session) and non-zero only when the agent
+  can't start a turn at all (e.g. a non-runnable spec), mirroring `--message`. This closes the
+  loop on the family's config/agent story: `--show-config` (what's resolved?), `--selfcheck`
+  (is it healthy?), `--message` (what does it say once?), and now `--repl` (does it *remember*?).
+
 ## [0.5.14] - 2026-07-14
 
 ### Fixed
