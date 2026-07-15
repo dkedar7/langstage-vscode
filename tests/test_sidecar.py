@@ -10,6 +10,8 @@ main()'s config resolution.
 import io
 import json
 
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from langstage_core import load_agent_spec
@@ -35,6 +37,23 @@ def _boom_graph():
     b.add_edge(START, "boom")
     b.add_edge("boom", END)
     return b.compile()
+
+
+def _memory_graph():
+    """A compiled graph WITH an in-process ``MemorySaver`` — the canonical
+    ``graph.compile(checkpointer=...)`` the README's memory note points at. Its one
+    node reports how many messages it has seen on the thread, so a rising count is
+    direct proof the checkpointer survived across turns.
+    """
+    def respond(state):
+        n = len(state["messages"])  # includes this turn's human message
+        return {"messages": [AIMessage(content=f"seen {n}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile(checkpointer=MemorySaver())
 
 
 def drive(graph, commands):
@@ -89,6 +108,56 @@ def test_message_turn_emits_content_and_terminals():
     assert any(e["type"] == "turn_end" and e["session_id"] == "s" for e in events)
     content = "".join(e.get("content", "") for e in events if e["type"] == "content")
     assert "hi there" in content
+
+
+# ── gh #54: conversational memory across turns in one persistent process ─────
+
+
+def _turns(events):
+    """Split a run()'s event stream into per-turn lists at each ``turn_end``."""
+    turns, cur = [], []
+    for e in events:
+        cur.append(e)
+        if e["type"] == "turn_end":
+            turns.append(cur)
+            cur = []
+    return turns
+
+
+def _reply(turn):
+    return "".join(e.get("content", "") for e in turn if e["type"] == "content")
+
+
+def test_memory_persists_across_turns_in_one_process():
+    # gh #54: a checkpointer-backed agent must remember prior turns when the sidecar
+    # PROCESS is persistent across turns (one run() loop, same session_id -> same
+    # thread_id). This is the invariant the VS Code extension now relies on by keeping
+    # ONE sidecar alive per conversation instead of spawning a fresh process — and a
+    # fresh in-process MemorySaver — per message. Turn 2 must see turn 1's human+ai
+    # messages plus its own human message (3), not start over at 1.
+    events = drive(_memory_graph(), [
+        {"type": "message", "session_id": "vscode", "content": "first"},
+        {"type": "message", "session_id": "vscode", "content": "second"},
+        {"type": "shutdown"},
+    ])
+    turns = _turns(events)
+    assert len(turns) == 2, [e["type"] for e in events]
+    assert _reply(turns[0]) == "seen 1"  # turn 1 sees only its own human message
+    assert _reply(turns[1]) == "seen 3"  # turn 2 remembers turn 1 (human+ai+human)
+
+
+def test_memory_lost_when_each_turn_gets_a_fresh_checkpointer():
+    # gh #54, the bug's shape: the extension USED to spawn a brand-new sidecar process —
+    # and thus a brand-new in-process MemorySaver — for every message, so turn 2 forgot
+    # turn 1. A distinct graph instance per turn models that fresh process: each sees
+    # only its own single human message ("seen 1"), never "seen 3". This is exactly why
+    # the extension must keep ONE process alive across a conversation's turns.
+    for content in ("first", "second"):
+        events = drive(_memory_graph(), [
+            {"type": "message", "session_id": "vscode", "content": content},
+            {"type": "shutdown"},
+        ])
+        assert _reply(_turns(events)[0]) == "seen 1"
 
 
 def test_invalid_json_reported():

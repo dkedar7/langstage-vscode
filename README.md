@@ -196,6 +196,18 @@ python -m langstage_vscode --demo
 > graph with no checkpointer is stateless: the second turn won't remember the
 > first, even with a matching `session_id`. This is expected LangGraph
 > behavior, not a sidecar bug.
+>
+> The **VS Code extension keeps one sidecar process alive per conversation** —
+> it spawns the sidecar on the first `@langstage` message and reuses that same
+> process (and the same `session_id`) for every following turn — so an
+> **in-process** checkpointer like `MemorySaver` persists across turns in chat,
+> not just when you drive the stdio protocol by hand (gh #54). The process is
+> restarted on a config change (interpreter / agent spec) and when you start a
+> new chat, so a new conversation begins with a clean thread. If you drive the
+> sidecar yourself, keep **one process** alive and send each turn to it — a fresh
+> process per message gets a fresh in-process checkpointer and forgets the prior
+> turn; a **persistent** checkpointer (`SqliteSaver`, `PostgresSaver`, …) keyed
+> by `thread_id` is what survives across separate processes.
 
 ## Development
 
