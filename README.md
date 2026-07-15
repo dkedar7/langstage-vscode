@@ -125,6 +125,29 @@ langstage-vscode-sidecar --agent ./my.py:graph --message "summarize the repo"
 langstage-vscode-sidecar --agent ./my.py:graph --message "hi" --json    # raw event frames
 ```
 
+`--message` answers "what does my agent say *once*?"; **`--repl`** answers "does it
+*remember*?" — the multi-turn companion to `--message`. It reads one prompt per line and
+drives a turn, but keeps **one long-lived session** (a single `session_id`, so a single
+LangGraph `thread_id`) alive for every turn — the same per-conversation shape the VS Code
+extension uses — so a **checkpointer-backed** agent's memory persists across turns. That
+makes the checkpointer caveat below verifiable from the CLI in ten seconds: tell it your
+name, ask on the next line. Exit with **Ctrl-D** (EOF) or a `:quit` line; `--json` streams
+the raw event frames instead of the assembled text, just like `--message`:
+
+```bash
+langstage-vscode-sidecar --agent ./my.py:graph --repl
+> my name is Kedar
+...
+> what is my name?
+...
+> :quit
+```
+
+An agent compiled with a checkpointer (`graph.compile(checkpointer=MemorySaver())`) will
+recall the first line on the second; one without a checkpointer won't — which is exactly the
+missing-checkpointer / wrong-`session_id` mistake to catch before wiring up the extension
+(see the memory note under [Sidecar protocol](#sidecar-protocol)).
+
 Your agent is any LangGraph `CompiledGraph` (e.g. from `deepagents`), exported
 under the name in the spec:
 
@@ -207,7 +230,10 @@ python -m langstage_vscode --demo
 > sidecar yourself, keep **one process** alive and send each turn to it — a fresh
 > process per message gets a fresh in-process checkpointer and forgets the prior
 > turn; a **persistent** checkpointer (`SqliteSaver`, `PostgresSaver`, …) keyed
-> by `thread_id` is what survives across separate processes.
+> by `thread_id` is what survives across separate processes. The **`--repl`** flag
+> (see [Configure](#configure)) does exactly this — one process, one session across
+> turns — so you can verify this memory behavior from the CLI without hand-crafting
+> the protocol.
 
 ## Development
 

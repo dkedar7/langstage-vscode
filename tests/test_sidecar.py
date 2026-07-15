@@ -673,3 +673,152 @@ def test_main_message_nonrunnable_spec_exits_1_with_clean_stdout(monkeypatch, tm
     captured = capsys.readouterr()
     assert captured.out.strip() == ""
     assert "not a runnable graph" in captured.err
+
+
+# ── interactive --repl (gh #56) ──────────────────────────────────────
+#
+# --repl is the multi-turn companion to one-shot --message: it reads a prompt per
+# input line, drives a turn over ONE long-lived session, and loops until EOF/:quit.
+# Because every turn shares one session_id (-> one thread_id) in one persistent
+# run() loop, a checkpointer-backed agent remembers prior turns — the whole point
+# (verify the README's conversational-memory caveat from the CLI).
+
+
+def drive_repl(graph, lines, *, as_json=False, spec=None):
+    """Drive _run_repl with a scripted stdin (one REPL input per line) and return
+    (exit_code, stdout, stderr). Prompt drawing is off (piped stdin, not a TTY)."""
+    from langstage_vscode.sidecar import _run_repl
+
+    stdin = io.StringIO("".join(line + "\n" for line in lines))
+    out, err = io.StringIO(), io.StringIO()
+    rc = _run_repl(
+        graph,
+        spec=spec,
+        as_json=as_json,
+        stdin=stdin,
+        stdout=out,
+        stderr=err,
+        show_prompt=False,
+    )
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_repl_memory_persists_across_turns():
+    # The centerpiece: two turns over one --repl session against a checkpointer-backed
+    # agent. Turn 2 must SEE turn 1 (human+ai+human = 3 messages), proving the session
+    # (thread_id) survived across turns — exactly what --message (fresh session_id
+    # "once" per call) cannot show. Driven in --json so each turn's reply is parseable.
+    rc, out, _ = drive_repl(_memory_graph(), ["first", "second"], as_json=True)
+    assert rc == 0
+    turns = _turns([json.loads(ln) for ln in out.splitlines() if ln.strip()])
+    assert len(turns) == 2
+    assert _reply(turns[0]) == "seen 1"  # turn 1 sees only its own human message
+    assert _reply(turns[1]) == "seen 3"  # turn 2 remembers turn 1 (human+ai+human)
+
+
+def test_repl_human_mode_renders_each_reply_on_its_own_line():
+    # Human mode: each turn's assembled reply is printed and closed off with a newline
+    # at turn_end, so replies don't run together and stdout stays the clean reply
+    # channel (no raw protocol frames). Ends on EOF (the scripted stdin runs out).
+    rc, out, err = drive_repl(_memory_graph(), ["first", "second"])
+    assert rc == 0
+    assert out == "seen 1\nseen 3\n"  # per-turn reply, each terminated by turn_end
+    assert '"type"' not in out  # human mode prints text, not protocol frames
+    assert err == ""  # no prompt (show_prompt off) and no error noise
+
+
+def test_repl_exits_cleanly_on_quit_and_ignores_later_lines():
+    # A ':quit' line ends the session immediately; any line after it is never read,
+    # so it never drives a turn. Exit is clean (0).
+    rc, out, _ = drive_repl(_stub(), ["hi there", ":quit", "unreached"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert len(_turns(frames)) == 1  # only the pre-:quit line drove a turn
+    content = "".join(f.get("content", "") for f in frames if f["type"] == "content")
+    assert "hi there" in content
+    assert "unreached" not in content  # the post-:quit line was never processed
+
+
+def test_repl_blank_lines_are_skipped_not_errored():
+    # A bare Enter (blank/whitespace-only line) re-prompts instead of driving an
+    # empty-content turn (which run() would reject with an error frame).
+    rc, out, _ = drive_repl(_stub(), ["", "   ", "hello"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert len(_turns(frames)) == 1  # only "hello" drove a turn
+    assert not any(f["type"] == "error" for f in frames)
+
+
+def test_repl_json_mode_streams_raw_frames_including_terminals():
+    # --json composes with --repl: raw event_to_dict frames (one per line), same as
+    # --message --json — including ready and per-turn complete/turn_end.
+    rc, out, _ = drive_repl(_stub(), ["hi"], as_json=True)
+    assert rc == 0
+    types = [json.loads(ln)["type"] for ln in out.splitlines() if ln.strip()]
+    assert types[0] == "ready"
+    for expected in ("ack", "content", "complete", "turn_end"):
+        assert expected in types
+
+
+def test_repl_prompt_is_drawn_to_stderr_keeping_stdout_clean():
+    # With a TTY (show_prompt on), the '> ' prompt is drawn to stderr so stdout stays
+    # the clean reply channel — the same stdout/stderr split --message uses.
+    from langstage_vscode.sidecar import _run_repl
+
+    stdin = io.StringIO("hi there\n")
+    out, err = io.StringIO(), io.StringIO()
+    rc = _run_repl(
+        _stub(), spec=None, as_json=False,
+        stdin=stdin, stdout=out, stderr=err, show_prompt=True,
+    )
+    assert rc == 0
+    assert "> " in err.getvalue()  # prompt on stderr
+    assert "> " not in out.getvalue()  # never on stdout
+    assert "You said: hi there" in out.getvalue()
+
+
+def test_repl_nonrunnable_spec_exits_1_with_clean_stdout():
+    # A start failure (non-runnable spec) emits an error before any turn runs, so no
+    # turn_end is seen: exit 1, actionable message on stderr, stdout empty — mirroring
+    # --message. (A per-turn error inside a live session, by contrast, exits 0.)
+    from langstage_vscode.sidecar import _run_repl
+
+    stdin = io.StringIO("hi\n")
+    out, err = io.StringIO(), io.StringIO()
+    rc = _run_repl(
+        42, spec="./x.py:make_graph", as_json=False,
+        stdin=stdin, stdout=out, stderr=err, show_prompt=False,
+    )
+    assert rc == 1
+    assert out.getvalue() == ""  # clean reply channel
+    assert "not a runnable graph" in err.getvalue()
+
+
+def test_repl_bad_turn_in_live_session_still_exits_clean():
+    # An agent that raises mid-turn surfaces an error frame but the turn still reaches
+    # turn_end, so a session that then ends on EOF exits 0 — the REPL is interactive,
+    # not a one-shot whose exit code gates CI.
+    rc, out, err = drive_repl(_boom_graph(), ["go"])
+    assert rc == 0  # clean EOF termination despite the bad turn
+    assert "kaboom" in err  # the failure was surfaced to stderr
+
+
+def test_main_repl_demo_end_to_end(monkeypatch, tmp_path, capsys):
+    # main() wires --repl: --demo answers real turns over a scripted stdin and exits 0
+    # on :quit. (sys.stdin is a StringIO here, so isatty() is False -> no prompt noise.)
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO("hi demo\n:quit\n"))
+    assert main(["--demo", "--repl"]) == 0
+    out = capsys.readouterr().out
+    assert "You said: hi demo" in out
+    assert '"type"' not in out  # human mode, clean channel
+
+
+def test_main_repl_conflicts_with_message(monkeypatch, tmp_path, capsys):
+    # --repl (multi-turn) and --message (one-shot) drive turns over different input
+    # models; asking for both is a contradiction and errors before any turn.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--repl", "--message", "hi"]) == 1
+    err = json.loads(capsys.readouterr().out.strip())
+    assert err["type"] == "error"
+    assert "mutually exclusive" in err["error"]
