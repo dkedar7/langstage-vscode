@@ -13,6 +13,7 @@ import json
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.types import interrupt
 
 from langstage_core import load_agent_spec
 
@@ -53,6 +54,23 @@ def _memory_graph():
     b.add_node("respond", respond)
     b.add_edge(START, "respond")
     b.add_edge("respond", END)
+    return b.compile(checkpointer=MemorySaver())
+
+
+def _interrupt_graph():
+    """A checkpointer-backed HITL agent that pauses on ``interrupt(...)`` — the issue's
+    minimal repro (gh #58). The single-dict payload reaches the wire as the NESTED
+    ``action_request`` shape (``{"action_request": {"action": ...}, ...}``), the shape
+    a real ``interrupt({...})`` HITL agent emits."""
+    def ask(state):
+        answer = interrupt({"action_request": {"action": "confirm", "args": {}},
+                            "description": "approve?"})
+        return {"messages": [AIMessage(content=f"resumed with: {answer}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("ask", ask)
+    b.add_edge(START, "ask")
+    b.add_edge("ask", END)
     return b.compile(checkpointer=MemorySaver())
 
 
@@ -822,3 +840,172 @@ def test_main_repl_conflicts_with_message(monkeypatch, tmp_path, capsys):
     err = json.loads(capsys.readouterr().out.strip())
     assert err["type"] == "error"
     assert "mutually exclusive" in err["error"]
+
+
+# ── gh #58: interrupt-aware turn drivers ─────────────────────────────
+#
+# Both --message and --repl used to render a turn that ends on a HITL interrupt(...)
+# as a silent BLANK exit-0 — indistinguishable from an empty reply and the one
+# sidecar capability with no CLI verification path. They now SURFACE the interrupt:
+# a concise notice on stderr in human mode (stdout stays the clean reply channel),
+# the raw `interrupt` frame on the --json stream, and — for one-shot --message — a
+# distinct non-zero exit code (2) so an interrupt turn is scriptable. (Answering the
+# interrupt inline in --repl is out of scope here — the issue's separate part 2.)
+
+
+def test_interrupt_actions_handles_nested_and_unwrapped_shapes():
+    # The core normalizer emits action_requests in two shapes: NESTED
+    # ({"action_request": {"action": ...}}) for a single-dict interrupt({...}), and
+    # UNWRAPPED ({"action": ...}) for the standard HumanInterrupt list interrupt([{...}]).
+    # The extractor must name the action for either, and tolerate junk without raising.
+    from langstage_vscode.sidecar import _interrupt_actions
+
+    nested = {"action_requests": [{"action_request": {"action": "confirm", "args": {}},
+                                   "description": "approve?"}]}
+    assert _interrupt_actions(nested) == ["confirm"]
+    unwrapped = {"action_requests": [{"action": "approve_tool", "args": {"x": 1}}]}
+    assert _interrupt_actions(unwrapped) == ["approve_tool"]
+    mixed = {"action_requests": [{"action": "a"}, {"action_request": {"action": "b"}}, "junk", {}]}
+    assert _interrupt_actions(mixed) == ["a", "b"]
+    assert _interrupt_actions({}) == []  # no action_requests key
+
+
+def test_format_interrupt_notice_is_ascii_and_names_action_and_decisions():
+    # The human-mode notice is CLI chrome, so it must be ASCII-safe (no U+23F8 pause
+    # glyph) to survive a cp1252 console unmangled — the same rule the ASCII --help and
+    # the _write_safe guard enforce. It names the pending action and the allowed decisions.
+    from langstage_vscode.sidecar import _format_interrupt_notice
+
+    frame = {"type": "interrupt",
+             "action_requests": [{"action_request": {"action": "confirm", "args": {}},
+                                  "description": "approve?"}],
+             "allowed_decisions": ["reject", "edit", "respond", "approve"]}
+    notice = _format_interrupt_notice(frame)
+    assert notice.isascii(), notice
+    assert "interrupt" in notice
+    assert "confirm" in notice
+    assert "reject | edit | respond | approve" in notice
+    assert notice.endswith("\n")
+
+
+def test_oneshot_sink_human_surfaces_interrupt_on_stderr_not_stdout():
+    # gh #58: an interrupt turn must not be blank. Human mode keeps stdout the clean
+    # reply channel and surfaces the pause on stderr, flagging saw_interrupt (which
+    # drives --message's non-zero exit) without flagging saw_error.
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=False)
+
+    sink.write(json.dumps({"type": "interrupt",
+                           "action_requests": [{"action_request": {"action": "confirm", "args": {}}}],
+                           "allowed_decisions": ["approve", "reject"]}) + "\n")
+    sink.write(json.dumps({"type": "complete"}) + "\n")
+    sink.write(json.dumps({"type": "turn_end", "session_id": "once"}) + "\n")
+    sink.close_reply()
+
+    assert out.getvalue() == ""  # stdout stays clean — no blank reply, no notice
+    assert "interrupt: agent paused" in err.getvalue()
+    assert "confirm" in err.getvalue()
+    assert sink.saw_interrupt is True
+    assert sink.saw_error is False
+
+
+def test_oneshot_sink_json_forwards_interrupt_frame_verbatim():
+    # gh #58: in --json mode the raw `interrupt` frame rides the stdout NDJSON stream
+    # unchanged (a consumer keys on type == "interrupt") and no stderr notice is drawn —
+    # one channel. saw_interrupt is still flagged for the exit code.
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=True)
+    frame = {"type": "interrupt",
+             "action_requests": [{"action_request": {"action": "confirm", "args": {}}}],
+             "allowed_decisions": ["approve"]}
+    sink.write(json.dumps(frame) + "\n")
+
+    assert json.loads(out.getvalue().strip()) == frame  # verbatim on stdout
+    assert sink.saw_interrupt is True
+    assert err.getvalue() == ""  # --json keeps everything on the one channel
+
+
+def test_oneshot_sink_normal_turn_sets_no_interrupt_flag():
+    # Regression: a normal content turn must not trip saw_interrupt (so a clean
+    # --message still exits 0, not 2).
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=False)
+    sink.write(json.dumps({"type": "content", "content": "hi"}) + "\n")
+    sink.write(json.dumps({"type": "complete"}) + "\n")
+    sink.write(json.dumps({"type": "turn_end", "session_id": "once"}) + "\n")
+    sink.close_reply()
+
+    assert out.getvalue() == "hi\n"
+    assert sink.saw_interrupt is False
+    assert err.getvalue() == ""
+
+
+def _run_once_interrupt(message, *, as_json):
+    """Drive one-shot --message against the interrupt graph via the real _run_once
+    driver, so its exit code and stdout/stderr split are exercised. _run_once takes the
+    graph directly and bypasses config resolution, so no config isolation is needed."""
+    from langstage_vscode.sidecar import _run_once
+
+    return _run_once(_interrupt_graph(), message, spec=None, as_json=as_json)
+
+
+def test_message_interrupt_turn_exits_2_with_notice_on_stderr(capsys):
+    # gh #58 end-to-end (human mode): --message on an interrupt turn exits 2 (a distinct,
+    # scriptable signal — not 0-and-blank, not 1-error), keeps stdout empty, and prints
+    # the interrupt notice to stderr naming the action and the allowed decisions.
+    rc = _run_once_interrupt("do it", as_json=False)
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no silent blank on stdout, and no protocol noise
+    assert "interrupt: agent paused" in captured.err
+    assert "confirm" in captured.err
+    assert "approve" in captured.err
+
+
+def test_message_interrupt_turn_json_emits_frame_and_exits_2(capsys):
+    # gh #58 end-to-end (--json): the raw `interrupt` frame is on stdout for a consumer
+    # to key on, and the exit code is the same distinct 2 as human mode.
+    rc = _run_once_interrupt("do it", as_json=True)
+    assert rc == 2
+    frames = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    interrupts = [f for f in frames if f.get("type") == "interrupt"]
+    assert interrupts, [f.get("type") for f in frames]
+    assert interrupts[0]["action_requests"][0]["action_request"]["action"] == "confirm"
+    assert "approve" in interrupts[0]["allowed_decisions"]
+
+
+def test_message_normal_turn_still_exits_0(monkeypatch, tmp_path, capsys):
+    # Regression: a normal (non-interrupt) turn is unchanged — reply on stdout, exit 0.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--message", "hello there"]) == 0
+    out = capsys.readouterr().out
+    assert "You said: hello there" in out
+
+
+def test_repl_surfaces_interrupt_on_stderr_and_exits_clean():
+    # gh #58: --repl surfaces an interrupt turn on stderr (human mode) instead of a
+    # blank, but — like a per-turn error in a live session — it does NOT fail the
+    # interactive session: a clean EOF/:quit still exits 0. stdout stays clean.
+    rc, out, err = drive_repl(_interrupt_graph(), ["do it"])
+    assert rc == 0
+    assert out == ""  # no blank reply on stdout
+    assert "interrupt: agent paused" in err
+    assert "confirm" in err
+
+
+def test_repl_json_streams_raw_interrupt_frame():
+    # gh #58: --json composes with --repl — the raw `interrupt` frame is on the NDJSON
+    # stream for a scripting consumer, no stderr notice.
+    rc, out, err = drive_repl(_interrupt_graph(), ["do it"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    interrupts = [f for f in frames if f.get("type") == "interrupt"]
+    assert interrupts, [f.get("type") for f in frames]
+    assert interrupts[0]["action_requests"][0]["action_request"]["action"] == "confirm"
+    assert "interrupt: agent paused" not in err  # --json: raw frame only, no human notice

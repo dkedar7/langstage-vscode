@@ -258,6 +258,55 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     )
 
 
+def _interrupt_actions(frame: dict[str, Any]) -> list[str]:
+    """Pull the human-readable action name(s) out of an ``interrupt`` frame's
+    ``action_requests``, tolerating both shapes the core normalizer emits.
+
+    A HITL ``interrupt(...)`` reaches the wire as one of two shapes depending on
+    the payload the agent passed (verified against langstage-core 1.0.19):
+
+    - a single-dict ``interrupt({...})`` keeps the request NESTED —
+      ``{"action_request": {"action": "confirm", ...}, "description": "..."}``;
+    - the standard HumanInterrupt LIST ``interrupt([{...}])`` is UNWRAPPED to
+      ``{"action": "approve_tool", "args": {...}}`` (gh #40/#44).
+
+    Read ``action`` from the nested ``action_request`` first, else from the top
+    level, so the notice names the real action for either shape (a missing/odd
+    shape just contributes nothing rather than raising)."""
+    actions: list[str] = []
+    for req in frame.get("action_requests") or []:
+        if not isinstance(req, dict):
+            continue
+        inner = req.get("action_request")
+        if isinstance(inner, dict) and inner.get("action") is not None:
+            actions.append(str(inner["action"]))
+        elif req.get("action") is not None:
+            actions.append(str(req["action"]))
+    return actions
+
+
+def _format_interrupt_notice(frame: dict[str, Any]) -> str:
+    """Render the concise human-mode notice for an ``interrupt`` turn.
+
+    ASCII-only on purpose: this is CLI chrome that must survive a cp1252 (strict)
+    console/pipe unmangled (the same constraint the em-dash-free ``--help`` and the
+    ``_write_safe`` guard enforce), so no ``U+23F8`` pause glyph. Names the pending
+    action(s) and the decisions the frame advertises, and points at the resume path
+    without over-claiming (answering inline isn't wired yet — gh #58 part 2)."""
+    actions = _interrupt_actions(frame)
+    allowed = [str(d) for d in (frame.get("allowed_decisions") or [])]
+    lines = ["interrupt: agent paused awaiting a decision"]
+    detail = []
+    if actions:
+        detail.append("action: " + ", ".join(actions))
+    if allowed:
+        detail.append("allowed: " + " | ".join(allowed))
+    if detail:
+        lines.append("  " + "   ".join(detail))
+    lines.append("  resume by sending a `decision` command (add --json to see the full request)")
+    return "\n".join(lines) + "\n"
+
+
 class _OneShotSink:
     """A write-only NDJSON sink handed to ``run()`` in place of an in-memory
     ``StringIO`` buffer, so a one-shot ``--message`` turn streams to the real stdout
@@ -275,10 +324,15 @@ class _OneShotSink:
       frames to stderr and keeping stdout the clean reply channel.
 
     Either way it records whether any ``error`` frame appeared, for the ``0`` clean /
-    non-zero on error exit contract ``--message`` has carried since gh #48. Every
-    write goes through ``_write_safe``, so a non-Latin-1 char in the reply still
-    degrades to an escape on a cp1252 stdout instead of crashing (gh #51 holds after
-    the switch to streaming).
+    non-zero on error exit contract ``--message`` has carried since gh #48, and — new
+    in gh #58 — whether the turn ended on a HITL ``interrupt`` (no ``content``), which
+    used to render as a silent blank exit-0 indistinguishable from an empty reply.
+    An interrupt turn now surfaces a concise notice to STDERR (keeping stdout the clean
+    reply channel) and flags ``saw_interrupt`` so ``--message`` can exit with a distinct
+    non-zero code; ``--json`` still forwards the raw ``interrupt`` frame verbatim (a
+    consumer keys on ``type == "interrupt"``). Every write goes through ``_write_safe``,
+    so a non-Latin-1 char in the reply still degrades to an escape on a cp1252 stdout
+    instead of crashing (gh #51 holds after the switch to streaming).
     """
 
     def __init__(self, out: TextIO, err: TextIO, *, as_json: bool) -> None:
@@ -287,6 +341,7 @@ class _OneShotSink:
         self._as_json = as_json
         self._buf = ""
         self.saw_error = False
+        self.saw_interrupt = False
         self.printed_reply = False
 
     def write(self, s: str) -> None:
@@ -310,10 +365,17 @@ class _OneShotSink:
         ftype = frame.get("type")
         if ftype == "error":
             self.saw_error = True
+        elif ftype == "interrupt":
+            # A turn that ends on a HITL interrupt (no content) — record it so the
+            # one-shot exit code can flag the pause, before the --json early return
+            # so it's tracked on both channels (gh #58).
+            self.saw_interrupt = True
 
         if self._as_json:
             # Forward the frame verbatim (run() emitted it via json.dumps, so it's
             # already ASCII-safe), flushing so a piped consumer sees it immediately.
+            # The raw `interrupt` frame rides this stream unchanged, so a --json
+            # consumer already keys on it (gh #58).
             _write_safe(self._out, line + "\n")
             self._out.flush()
             return
@@ -327,6 +389,13 @@ class _OneShotSink:
         elif ftype == "error":
             # stdout stays the clean reply channel; surface the failure on stderr.
             _write_safe(self._err, f"error: {frame.get('error', '')}\n")
+        elif ftype == "interrupt":
+            # gh #58: never render an interrupt turn as blank. Surface a concise
+            # notice on stderr (stdout stays the clean reply channel, exactly like the
+            # error path) so a paused agent isn't invisible. The full request is on the
+            # --json stream for a consumer that needs the payload.
+            _write_safe(self._err, _format_interrupt_notice(frame))
+            self._err.flush()
 
     def close_reply(self) -> None:
         """Terminate a live human-mode reply with the trailing newline the old
@@ -350,13 +419,19 @@ class _ReplSink(_OneShotSink):
     SAME ``run()`` loop stay alive across turns — so a checkpointer-backed agent's
     memory persists (gh #54's invariant). This sink reuses ``_OneShotSink``'s live
     ``content`` rendering, ``error``-to-stderr routing, ``--json`` frame forwarding,
-    ``saw_error`` tracking, and cp1252-safe ``_write_safe`` writes verbatim — the
-    ONLY thing it adds is a per-turn boundary: ``run()`` emits ``turn_end`` after
-    every turn, so on each one (in human mode) it closes off the streamed reply with
-    the trailing newline ``_OneShotSink`` would otherwise add just once, and resets
-    for the next turn. In ``--json`` mode ``turn_end`` is forwarded verbatim like any
-    other frame (the base class already does that), so the raw NDJSON stream is
-    unbroken for a scripting consumer.
+    ``saw_error`` tracking, the gh #58 ``interrupt``-notice-to-stderr surfacing, and
+    cp1252-safe ``_write_safe`` writes verbatim — the ONLY thing it adds is a per-turn
+    boundary: ``run()`` emits ``turn_end`` after every turn, so on each one (in human
+    mode) it closes off the streamed reply with the trailing newline ``_OneShotSink``
+    would otherwise add just once, and resets for the next turn. In ``--json`` mode
+    ``turn_end`` is forwarded verbatim like any other frame (the base class already
+    does that), so the raw NDJSON stream is unbroken for a scripting consumer.
+
+    An interrupt turn in a REPL session is surfaced (the inherited stderr notice) but
+    does NOT end the interactive session — like a per-turn ``error``, it is visible but
+    non-fatal. Answering the interrupt inline (mapping the next input line to a
+    ``decision`` on the live session, gh #58 part 2) is intentionally still future
+    work; today the next line starts a fresh turn.
     """
 
     def __init__(self, out: TextIO, err: TextIO, *, as_json: bool) -> None:
@@ -472,9 +547,15 @@ def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> i
     produced; ``--json`` streams the raw ``event_to_dict`` frames (one per line) for
     scripting. Both stream frame-by-frame as ``run()`` emits them rather than
     buffering the whole turn and dumping it at the end (gh #50) — so a slow or
-    token-streaming agent no longer looks frozen. Exit 0 on a clean turn, non-zero if
-    an ``error`` frame appears — the same contract the stdio loop's ``error`` frame
-    carries. Internally this is the ``run()`` loop fed an in-memory
+    token-streaming agent no longer looks frozen.
+
+    Exit code is a three-way signal (gh #58): ``0`` on a clean reply, ``1`` if an
+    ``error`` frame appears (the stdio loop's ``error`` contract), and ``2`` if the
+    turn ended on a HITL ``interrupt`` (the agent paused awaiting a decision) — a
+    distinct, scriptable code so an interrupt turn is no longer a silent blank exit-0
+    indistinguishable from an empty reply. The notice is on stderr in human mode and
+    the raw ``interrupt`` frame is on the ``--json`` stream; the exit code flags it on
+    either. Internally this is the ``run()`` loop fed an in-memory
     ``[message, shutdown]`` script (like ``_selfcheck``), but writing to a streaming
     sink instead of a ``StringIO`` buffer.
     """
@@ -488,7 +569,11 @@ def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> i
     run(graph, iter(commands), sink, spec=spec)
     sink.close_reply()  # human mode: close the streamed reply with a trailing newline
 
-    return 1 if sink.saw_error else 0
+    if sink.saw_error:
+        return 1
+    if sink.saw_interrupt:
+        return 2  # the turn paused on an interrupt awaiting a decision (gh #58)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -535,8 +620,9 @@ def main(argv: list[str] | None = None) -> int:
         dest="message",
         metavar="TEXT",
         help="One-shot: drive a single turn with TEXT, print the agent's reply, and exit "
-        "(0 on success / non-zero on an error frame) with no stdio protocol handshake. "
-        "Pair with --json to emit the raw event frames instead of the assembled text.",
+        "(0 on a reply, 2 if the agent pauses on a HITL interrupt, 1 on an error frame) "
+        "with no stdio protocol handshake. Pair with --json to emit the raw event frames "
+        "instead of the assembled text.",
     )
     parser.add_argument(
         "--repl",

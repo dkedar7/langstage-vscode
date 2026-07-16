@@ -148,6 +148,26 @@ recall the first line on the second; one without a checkpointer won't — which 
 missing-checkpointer / wrong-`session_id` mistake to catch before wiring up the extension
 (see the memory note under [Sidecar protocol](#sidecar-protocol)).
 
+Both turn-drivers are **interrupt-aware**. If your agent pauses on a human-in-the-loop
+`interrupt(...)` (the common `deepagents` / LangGraph approval pattern), the turn is no longer
+a silent blank — the pending action and the decisions it allows are surfaced on **stderr**
+(stdout stays the clean reply channel), and one-shot `--message` exits with a distinct code
+**`2`** so an interrupt is scriptable, distinct from a clean reply (`0`) or an error (`1`):
+
+```console
+$ langstage-vscode-sidecar --agent ./hitl.py:graph --message "do it"
+interrupt: agent paused awaiting a decision
+  action: confirm   allowed: reject | edit | respond | approve
+  resume by sending a `decision` command (add --json to see the full request)
+$ echo $?
+2
+```
+
+With `--json`, the raw `{"type": "interrupt", ...}` frame streams on stdout, so a consumer keys
+on it directly. Answering the interrupt to resume the round-trip is a `decision` command over the
+raw stdio protocol (`{"type": "decision", "session_id": "...", "decisions": [{"type": "approve"}]}`);
+answering it *inline* from `--repl` is not wired yet.
+
 Your agent is any LangGraph `CompiledGraph` (e.g. from `deepagents`), exported
 under the name in the spec:
 
