@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.16] - 2026-07-16
+
+### Fixed
+- **The CLI turn-drivers are now interrupt-aware: `--message` and `--repl` no longer render a
+  turn that ends on a HITL `interrupt(...)` as a silent blank exit-0 (gh #58).** The family
+  grew a verification flag for every question a user asks before wiring up chat — `--show-config`
+  (what's resolved?), `--selfcheck` (is it healthy?), `--message` (what does it say once?),
+  `--repl` (does it remember?) — but the **one documented sidecar capability with no CLI
+  verification path** was the human-in-the-loop `interrupt` → `decision` round-trip, and it was
+  precisely the one that broke worst: when an agent hit a LangGraph `interrupt(...)`, both
+  `--message` and `--repl` printed **nothing** to stdout and stderr and exited **0** —
+  indistinguishable from an empty reply or a silent no-op, even though the runtime *did* pause
+  (the raw `interrupt` frame was there all along on the `--json` stream). Now an interrupt turn
+  is **surfaced**: in human mode a concise notice goes to **stderr** (keeping stdout the clean
+  reply channel, exactly like the `error` path) naming the pending action and the decisions the
+  frame advertises — e.g. `interrupt: agent paused awaiting a decision` / `action: confirm
+  allowed: reject | edit | respond | approve`; in `--json` mode the raw `interrupt` frame streams
+  on stdout as before, so a consumer keys on `type == "interrupt"`. One-shot **`--message` also
+  gains a distinct exit code: `2` when the turn ends on an interrupt** (vs `0` on a clean reply
+  and `1` on an `error` frame), so the pause is scriptable/CI-gateable instead of a silent
+  exit-0. The notice is ASCII-only so it survives a cp1252 console unmangled (the same rule the
+  `--help` and `_write_safe` guards enforce), and both drivers reuse the shared streaming sink so
+  the two can't drift. `--repl` surfaces the interrupt the same way but, like a per-turn `error`
+  in a live session, keeps the interactive session alive (clean EOF/`:quit` still exits `0`).
+  This makes the last unverifiable sidecar capability verifiable in ten seconds:
+  `langstage-vscode-sidecar --agent ./hitl.py:graph --message "do it"; echo $?` now prints the
+  pending action and exits `2`. **Note:** *answering* an interrupt inline in `--repl` (mapping
+  the next input line to a `decision` on the live session — the issue's separate part 2) is
+  intentionally still future work; today the next line starts a fresh turn. Drive the `decision`
+  command over the raw stdio protocol to complete the round-trip.
+
 ## [0.5.15] - 2026-07-15
 
 ### Added
