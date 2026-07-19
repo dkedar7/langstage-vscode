@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.17] - 2026-07-18
+
+### Fixed
+- **The PyPI project page is no longer blank — the README ships with the package (gh #60).**
+  `[project]` in `pyproject.toml` had no `readme` key, so hatchling never set a long
+  description or `Description-Content-Type`, and <https://pypi.org/project/langstage-vscode/>
+  rendered nothing: no install command, no Quickstart, no sidecar-protocol table. An adopter's
+  natural first stop carried none of the 12 KB README sitting in the repo, making this the one
+  LangStage stage whose docs never reached PyPI. Adding `readme = "README.md"` restores parity
+  with every sibling stage. A packaging test now asserts the key is present and points at real
+  content, so the omission cannot silently return.
+
+  This also removes the trap described in #61: because PyPI carried no README, adopters were
+  pushed to the repo `HEAD` README, which documented behavior newer than the latest *installable*
+  release. With 0.5.17 published, the rendered PyPI docs and the shipped code match again.
+
 ## [0.5.16] - 2026-07-16
 
 ### Fixed
