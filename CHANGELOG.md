@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.18] - 2026-07-19
+
+### Added
+- **`--repl` can now ANSWER a human-in-the-loop interrupt, completing the `interrupt` ->
+  `decision` round-trip from the CLI (gh #63).** This is the deferred **part 2** of gh #58 and
+  it **supersedes the "intentionally still future work" note in 0.5.16 below** — that note was
+  accurate when it shipped and is no longer true. 0.5.16 made the pause *visible* (a stderr
+  notice, and exit `2` for one-shot `--message`), but you still could not *answer* it: the next
+  `--repl` line started a **fresh `message` turn**, which — for the common approval agent — just
+  re-interrupts, so an `approve` line looked accepted while the pending interrupt was never
+  resumed. Completing the round-trip meant dropping to hand-written NDJSON over the raw stdio
+  protocol with one process kept alive and matching `session_id`s: exactly the friction
+  `--message`/`--repl` exist to remove, and the last sidecar capability with no CLI verification
+  path. Now a turn that ends on an `interrupt` puts the session in **decision mode**, and the
+  next line becomes a `{"type": "decision", ...}` command on the **same** `session_id` (hence the
+  same LangGraph `thread_id`), so it lands on *that* thread's pending interrupt and the resumed
+  reply streams through the same sink:
+
+  ```console
+  $ printf 'do it\napprove\n:quit\n' | langstage-vscode-sidecar --agent ./hitl.py:graph --repl
+  interrupt: agent paused awaiting a decision
+    action: confirm   allowed: reject | edit | respond | approve
+    answer it here: `:decision <verb>` (or a bare `<verb>`) using a verb above
+    payloads: reject [<text>] | edit <json> | respond <text>
+  resumed with: {'decisions': [{'type': 'approve'}]}
+  ```
+
+  The design calls, all aimed at the failure mode that would be worse than the old honest
+  limitation — silently treating a message as a decision, or a decision as a message:
+
+  - **While an interrupt is pending, every line is an answer attempt** (`:quit` excepted, so
+    there is always a way out). A line that isn't a valid decision is **refused on stderr and
+    re-prompted with the interrupt left pending** — never silently downgraded to a `message`
+    (the bug) and never swallowed. The note names what you typed, why it was refused, and the
+    verbs this interrupt actually allows, so the next line still answers it.
+  - **`:decision <verb> [payload]`** is the explicit form, in the same `:`-prefixed command
+    namespace as `:quit`, and it is what the notice tells you to type. A **bare `<verb>`** also
+    works, but *only* while an interrupt is pending — the one state where it is unambiguous;
+    outside decision mode `approve` is ordinary chat text and still drives a normal turn, and a
+    stray `:decision` is refused with "no interrupt is pending" rather than chatted at the agent.
+  - **The accepted verbs come from the interrupt frame itself** (`allowed_decisions`), never a
+    hard-coded list: an interrupt that advertises only `reject | approve` (the `allow_ignore` +
+    `allow_accept` shape) refuses `edit` and never offers it in the notice. Payload grammar
+    follows the canonical langchain HITL decisions — `approve`, `reject [<text>]`,
+    `respond <text>`, `edit <json>` — where free text becomes `message` and a JSON object is
+    merged in, so the full typed shapes (`edit {"edited_action": {...}}`) are reachable.
+  - **`--json` composes unchanged and is the machine-readable proof.** The answer line now emits
+    `ack decision` (not the old `ack message` + a second `interrupt`), so the trace reads
+    `ready -> ack message -> interrupt -> turn_end -> ack decision -> content -> turn_end` —
+    identical to the hand-written raw-protocol transcript. Refusals stay on stderr, so the NDJSON
+    stream carries no frame for a rejected line.
+  - **The interrupt notice now tells you what to type.** In `--repl` it prints the inline answer
+    syntax; one-shot `--message` keeps the old "resume by sending a `decision` command" line,
+    since that process exits at `turn_end` and genuinely cannot answer. Still ASCII-only, same
+    cp1252 rule. At a TTY the prompt also changes to `decision> ` while a decision is pending.
+
+### Changed
+- **`--repl` exit codes are now a three-way signal, matching `--message` (gh #63).** `0` on a
+  clean session — **including a turn that interrupted and WAS answered** — `1` if the agent could
+  not start at all (e.g. a non-runnable spec), and **`2` if the session ends (EOF/`:quit`) with an
+  interrupt still pending**, i.e. never answered. Under 0.5.16 `--repl` always exited `0` on an
+  interrupt because it had no way to answer one, so the pause was purely informational; now that
+  answering is a first-class REPL action, walking away from a pending interrupt is a real outcome
+  and gets the same "paused awaiting a decision" code `--message` has carried since 0.5.16. This
+  makes the whole round-trip scriptable in one line:
+  `printf 'do it\napprove\n' | ... --repl; echo $?` -> `0` proves it completed, `2` proves it did not.
+
 ## [0.5.17] - 2026-07-18
 
 ### Fixed
@@ -48,6 +115,9 @@ All notable changes to this project will be documented in this file.
   the next input line to a `decision` on the live session — the issue's separate part 2) is
   intentionally still future work; today the next line starts a fresh turn. Drive the `decision`
   command over the raw stdio protocol to complete the round-trip.
+  > **Superseded in 0.5.18 (gh #63):** the deferral above no longer holds. `--repl` answers an
+  > interrupt inline via `:decision <verb>` (or a bare verb), and `--repl` exits `2` — not `0` —
+  > when a session ends with an interrupt still unanswered. See the 0.5.18 entry.
 
 ## [0.5.15] - 2026-07-15
 
