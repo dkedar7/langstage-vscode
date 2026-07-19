@@ -988,12 +988,17 @@ def test_message_normal_turn_still_exits_0(monkeypatch, tmp_path, capsys):
     assert "You said: hello there" in out
 
 
-def test_repl_surfaces_interrupt_on_stderr_and_exits_clean():
+def test_repl_surfaces_interrupt_on_stderr_and_keeps_session_alive():
     # gh #58: --repl surfaces an interrupt turn on stderr (human mode) instead of a
-    # blank, but — like a per-turn error in a live session — it does NOT fail the
-    # interactive session: a clean EOF/:quit still exits 0. stdout stays clean.
+    # blank, and — like a per-turn error in a live session — it does NOT end the
+    # interactive session. stdout stays clean.
+    # gh #63 refines the EXIT code: the session here ends (EOF) with the interrupt
+    # still pending, i.e. never answered, so it now exits 2 — the same "paused awaiting
+    # a decision" signal --message has carried since #58. Under #58 --repl always
+    # returned 0 here because it had no way to answer; now that it does, walking away
+    # from a pending interrupt is a real outcome worth a distinct code.
     rc, out, err = drive_repl(_interrupt_graph(), ["do it"])
-    assert rc == 0
+    assert rc == 2  # interrupt left unanswered at EOF
     assert out == ""  # no blank reply on stdout
     assert "interrupt: agent paused" in err
     assert "confirm" in err
@@ -1001,11 +1006,258 @@ def test_repl_surfaces_interrupt_on_stderr_and_exits_clean():
 
 def test_repl_json_streams_raw_interrupt_frame():
     # gh #58: --json composes with --repl — the raw `interrupt` frame is on the NDJSON
-    # stream for a scripting consumer, no stderr notice.
+    # stream for a scripting consumer, no stderr notice. (Exit 2 per gh #63: the
+    # interrupt was never answered.)
     rc, out, err = drive_repl(_interrupt_graph(), ["do it"], as_json=True)
-    assert rc == 0
+    assert rc == 2
     frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
     interrupts = [f for f in frames if f.get("type") == "interrupt"]
     assert interrupts, [f.get("type") for f in frames]
     assert interrupts[0]["action_requests"][0]["action_request"]["action"] == "confirm"
     assert "interrupt: agent paused" not in err  # --json: raw frame only, no human notice
+
+
+# ── gh #63: answering a HITL interrupt inline from --repl ────────────
+#
+# gh #58 made an interrupt VISIBLE; completing the interrupt -> decision round-trip
+# still meant hand-writing NDJSON over the raw protocol, because a --repl line after
+# an interrupt started a FRESH message turn (which just re-interrupts, so the answer
+# silently looked accepted). Now a turn that ends on an interrupt puts the session in
+# DECISION MODE: the next line becomes a `decision` command on the SAME session.
+#
+# The design contract these tests pin down:
+#   * while pending, EVERY line (except :quit) is an answer attempt — a line that
+#     isn't a valid decision is REFUSED on stderr and re-prompted, never downgraded
+#     to a message and never swallowed;
+#   * which verbs are valid comes from the interrupt frame's own allowed_decisions,
+#     never a hard-coded list;
+#   * `:decision <verb>` is the explicit form (same `:` namespace as `:quit`), and a
+#     bare verb works only while pending, where it is unambiguous;
+#   * exit 0 when the interrupt was answered, 2 when the session ends with one still
+#     pending.
+
+
+def _interrupt_graph_limited():
+    """The issue's own minimal HITL agent (gh #63): a HumanInterrupt LIST whose config
+    allows only ignore/accept, so the frame advertises exactly `reject | approve` — the
+    fixture that proves the verb list is read off the FRAME, not hard-coded."""
+    def ask(state):
+        req = {"action_request": {"action": "delete_file", "args": {"path": "x"}},
+               "config": {"allow_ignore": True, "allow_accept": True},
+               "description": "Delete file x?"}
+        decision = interrupt([req])
+        return {"messages": [AIMessage(content=f"got {decision}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("ask", ask)
+    b.add_edge(START, "ask")
+    b.add_edge("ask", END)
+    return b.compile(checkpointer=MemorySaver())
+
+
+def _acks(frames):
+    """The `ack` refs in order — `message` vs `decision` is exactly what the issue's
+    --json trace uses to show whether the round-trip completed."""
+    return [f.get("ref") for f in frames if f.get("type") == "ack"]
+
+
+def test_parse_repl_decision_maps_verbs_and_payloads():
+    # The four canonical langchain HITL shapes, built from an answer line: bare verb,
+    # optional/required text (-> `message`), and a JSON object merged in (-> the full
+    # typed shape, e.g. EditDecision's `edited_action`). Verb matching is
+    # case-insensitive; the frame's spelling wins the `type` key.
+    from langstage_vscode.sidecar import _parse_repl_decision
+
+    allowed = ["reject", "edit", "respond", "approve"]
+    assert _parse_repl_decision("approve", allowed) == ({"type": "approve"}, None)
+    assert _parse_repl_decision("APPROVE", allowed) == ({"type": "approve"}, None)
+    assert _parse_repl_decision("reject", allowed) == ({"type": "reject"}, None)
+    assert _parse_repl_decision("reject too risky", allowed) == (
+        {"type": "reject", "message": "too risky"}, None)
+    assert _parse_repl_decision("respond do not delete it", allowed) == (
+        {"type": "respond", "message": "do not delete it"}, None)
+    decision, err = _parse_repl_decision('edit {"edited_action": {"name": "x"}}', allowed)
+    assert err is None
+    assert decision == {"edited_action": {"name": "x"}, "type": "edit"}
+
+
+def test_parse_repl_decision_refuses_unadvertised_verbs_and_bad_payloads():
+    # Constraint: nothing is guessed. A verb the frame didn't advertise is refused even
+    # when it is a canonical HITL verb; a missing required payload, a malformed JSON
+    # payload, and junk trailing a no-payload verb are all refused with a reason —
+    # never coerced into a decision the agent didn't offer.
+    from langstage_vscode.sidecar import _parse_repl_decision
+
+    limited = ["reject", "approve"]
+    decision, err = _parse_repl_decision("edit {}", limited)
+    assert decision is None and "not a decision this interrupt allows" in err
+    decision, err = _parse_repl_decision("looks fine to me", limited)
+    assert decision is None and "`looks`" in err
+
+    full = ["reject", "edit", "respond", "approve"]
+    decision, err = _parse_repl_decision("respond", full)
+    assert decision is None and "needs a payload" in err
+    decision, err = _parse_repl_decision("edit", full)
+    assert decision is None and "needs a payload" in err
+    decision, err = _parse_repl_decision("edit oops", full)
+    assert decision is None and "JSON" in err
+    decision, err = _parse_repl_decision('edit {"broken"', full)
+    assert decision is None and "not valid JSON" in err
+    decision, err = _parse_repl_decision("approve sure thing", full)
+    assert decision is None and "takes no payload" in err
+
+
+def test_repl_interrupt_notice_tells_you_what_to_type_from_the_frame():
+    # Discoverability: in --repl the notice prints the literal syntax to type instead of
+    # pointing at the raw protocol, and the verbs it offers come from THIS frame's
+    # allowed_decisions — an interrupt that allows only reject/approve must not
+    # advertise edit/respond. Still ASCII-only (cp1252 console rule).
+    from langstage_vscode.sidecar import _format_interrupt_notice
+
+    frame = {"type": "interrupt",
+             "action_requests": [{"action": "delete_file", "args": {"path": "x"}}],
+             "allowed_decisions": ["reject", "approve"]}
+    notice = _format_interrupt_notice(frame, repl=True)
+    assert notice.isascii(), notice
+    assert ":decision <verb>" in notice
+    assert "reject | approve" in notice
+    assert "edit" not in notice and "respond" not in notice
+
+    # The one-shot flavour is unchanged: --message exits at turn_end, so it can only
+    # point at the raw `decision` command.
+    oneshot = _format_interrupt_notice(frame)
+    assert "resume by sending a `decision` command" in oneshot
+    assert ":decision" not in oneshot
+
+
+def test_repl_sink_tracks_pending_interrupt_and_clears_it_on_the_next_ack():
+    # The state the REPL loop branches on. An `interrupt` frame sets it; the next `ack`
+    # (a command was accepted, i.e. it is being acted on) clears it — so a resumed turn
+    # that completes leaves nothing pending, and one that interrupts AGAIN stays pending.
+    from langstage_vscode.sidecar import _ReplSink
+
+    sink = _ReplSink(io.StringIO(), io.StringIO(), as_json=True)
+    assert sink.pending_interrupt is None
+    sink.write(json.dumps({"type": "ack", "ref": "message"}) + "\n")
+    frame = {"type": "interrupt", "action_requests": [], "allowed_decisions": ["approve"]}
+    sink.write(json.dumps(frame) + "\n")
+    sink.write(json.dumps({"type": "turn_end", "session_id": "repl"}) + "\n")
+    assert sink.pending_interrupt == frame  # survives turn_end: that IS the pending state
+    sink.write(json.dumps({"type": "ack", "ref": "decision"}) + "\n")
+    assert sink.pending_interrupt is None
+    sink.write(json.dumps({"type": "content", "content": "resumed"}) + "\n")
+    sink.write(json.dumps({"type": "turn_end", "session_id": "repl"}) + "\n")
+    assert sink.pending_interrupt is None
+
+
+def test_repl_bare_verb_answers_the_pending_interrupt_and_resumes_the_turn():
+    # THE round-trip (the issue's headline): `do it` interrupts, `approve` answers it,
+    # and the resumed turn's reply is printed — one command, no hand-written NDJSON.
+    # The reply echoes the decision payload, proving it reached the agent intact.
+    rc, out, err = drive_repl(_interrupt_graph(), ["do it", "approve"])
+    assert rc == 0  # the interrupt was answered, so the session ends clean
+    assert out == "resumed with: {'decisions': [{'type': 'approve'}]}\n"
+    assert "interrupt: agent paused" in err  # the pause was still surfaced
+    assert "not a decision" not in err
+
+
+def test_repl_json_trace_shows_ack_decision_not_a_second_ack_message():
+    # The machine-readable proof from the issue. Before the fix the answer line emitted
+    # `ack message` + a SECOND `interrupt` (a fresh turn that just re-interrupted);
+    # after it the trace is ack message -> interrupt -> turn_end -> ack DECISION ->
+    # content -> turn_end, exactly like the hand-written raw-protocol transcript.
+    rc, out, _ = drive_repl(_interrupt_graph(), ["do it", "approve"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert _acks(frames) == ["message", "decision"]
+    assert [f["type"] for f in frames if f["type"] == "interrupt"] == ["interrupt"]
+    turns = _turns(frames)
+    assert len(turns) == 2
+    assert _reply(turns[1]) == "resumed with: {'decisions': [{'type': 'approve'}]}"
+
+
+def test_repl_explicit_decision_command_answers_the_interrupt():
+    # `:decision <verb>` — the explicit form, in the same `:`-prefixed namespace as
+    # `:quit`, and the form the notice tells you to type. Payload verbs compose with it.
+    rc, out, _ = drive_repl(
+        _interrupt_graph(), ["do it", ":decision respond leave it alone"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert _acks(frames) == ["message", "decision"]
+    assert _reply(_turns(frames)[1]) == (
+        "resumed with: {'decisions': [{'type': 'respond', 'message': 'leave it alone'}]}")
+
+
+def test_repl_invalid_line_while_pending_is_refused_not_sent_as_a_message():
+    # Constraint 1, the whole point: a line that isn't a valid decision while an
+    # interrupt is pending must be OBVIOUS and RECOVERABLE. It is not silently sent as
+    # a new message (the gh #63 bug — that just re-interrupts and looks accepted) and
+    # not swallowed: it is named on stderr with the verbs this frame allows, the
+    # interrupt stays pending, and the very next line still answers it.
+    rc, out, err = drive_repl(
+        _interrupt_graph(), ["do it", "looks fine to me", "approve"], as_json=True)
+    assert rc == 0  # the retry landed
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert _acks(frames) == ["message", "decision"]  # the junk line drove NO turn
+    assert len(_turns(frames)) == 2
+    assert "not a decision: 'looks fine to me'" in err
+    assert "still pending" in err
+    assert "reject" in err and "approve" in err  # the frame's verbs, repeated
+    assert _reply(_turns(frames)[1]) == "resumed with: {'decisions': [{'type': 'approve'}]}"
+
+
+def test_repl_abandoning_a_pending_interrupt_exits_2():
+    # `:quit` is checked before decision parsing, so it is always the way out — but the
+    # interrupt was never answered, so the session reports the gh #58 "paused awaiting a
+    # decision" code rather than a false-clean 0.
+    rc, out, err = drive_repl(_interrupt_graph(), ["do it", "nonsense", ":quit"])
+    assert rc == 2
+    assert out == ""
+    assert "not a decision" in err
+
+
+def test_repl_decision_verbs_are_read_off_the_frame_not_a_hardcoded_list():
+    # The issue's own agent advertises only `reject | approve` (allow_ignore +
+    # allow_accept). `edit` is a canonical HITL verb but THIS interrupt doesn't allow
+    # it, so it is refused; `approve` resumes.
+    rc, out, err = drive_repl(
+        _interrupt_graph_limited(), ["do it", "edit {}", "approve"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert _acks(frames) == ["message", "decision"]
+    assert "not a decision this interrupt allows" in err
+    assert _reply(_turns(frames)[1]) == "got {'decisions': [{'type': 'approve'}]}"
+
+
+def test_repl_decision_lands_on_the_live_session_thread():
+    # Session/thread continuity: both turns carry the REPL's one session_id, so the
+    # decision resumes THAT thread's pending interrupt (a decision on a fresh thread
+    # would have nothing to resume and could not produce the resumed reply).
+    rc, out, _ = drive_repl(_interrupt_graph(), ["do it", "approve"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    ends = [f for f in frames if f["type"] == "turn_end"]
+    assert [f["session_id"] for f in ends] == ["repl", "repl"]
+
+
+def test_repl_decision_command_outside_decision_mode_is_refused():
+    # `:decision ...` with nothing paused answers nothing — it must not be chatted at
+    # the agent as text, and must not fabricate a `decision` command the sidecar would
+    # reject. It is named on stderr and the session continues normally.
+    rc, out, err = drive_repl(_stub(), [":decision approve", "hi there"], as_json=True)
+    assert rc == 0
+    frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
+    assert _acks(frames) == ["message"]  # only "hi there" drove a turn
+    assert not any(f["type"] == "error" for f in frames)
+    assert "no interrupt is pending" in err
+    content = "".join(f.get("content", "") for f in frames if f["type"] == "content")
+    assert ":decision" not in content  # never sent as chat text
+
+
+def test_repl_bare_verb_with_nothing_pending_is_still_an_ordinary_message():
+    # Regression + the reason a bare verb is only accepted while pending: outside
+    # decision mode "approve" is ordinary chat text, and stays so.
+    rc, out, err = drive_repl(_stub(), ["approve"])
+    assert rc == 0
+    assert "You said: approve" in out
+    assert err == ""

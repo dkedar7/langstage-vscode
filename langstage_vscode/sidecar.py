@@ -285,16 +285,64 @@ def _interrupt_actions(frame: dict[str, Any]) -> list[str]:
     return actions
 
 
-def _format_interrupt_notice(frame: dict[str, Any]) -> str:
+# The explicit `--repl` form for answering a pending interrupt, in the same
+# `:`-prefixed command namespace as `:quit` (see ``_REPL_QUIT``). Named here because
+# the interrupt notice prints it as the literal syntax to type (gh #63).
+_DECISION_CMD = ":decision"
+
+
+def _interrupt_allowed(frame: dict[str, Any]) -> list[str]:
+    """The decision verbs THIS interrupt advertises, straight from the frame.
+
+    The single source of truth for what an answer may say: the notice prints it, the
+    REPL parser validates against it, and neither hard-codes a verb list — a middleware
+    that allows only ``approve``/``reject`` must not have ``edit`` offered or accepted
+    (gh #63)."""
+    return [str(d) for d in (frame.get("allowed_decisions") or [])]
+
+
+# Payload grammar per decision verb, for rendering usage hints and parsing a REPL
+# answer line. NOTE: which verbs are ACCEPTED never comes from here — that is always
+# the frame's own ``allowed_decisions`` (see ``_interrupt_allowed``). This table only
+# describes what a given verb's payload looks like, for the four canonical langchain
+# HITL decisions (``ApproveDecision``/``RejectDecision``/``RespondDecision``/
+# ``EditDecision``). ``(required, kind)``; ``kind=None`` means "takes no payload".
+_DECISION_ARGS: dict[str, tuple[bool, str | None]] = {
+    "approve": (False, None),
+    "reject": (False, "text"),  # optional message explaining the rejection
+    "respond": (True, "text"),  # required message answering on the tool's behalf
+    "edit": (True, "json"),  # required object, e.g. {"edited_action": {...}}
+}
+# An advertised verb this build has never heard of: accept it (the frame says it is
+# valid) with an optional free-text payload, rather than refusing something the agent
+# explicitly allows.
+_DECISION_ARGS_DEFAULT: tuple[bool, str | None] = (False, "text")
+
+
+def _decision_usage(verb: str) -> str:
+    """One token of usage help for ``verb`` — ``approve`` / ``reject [<text>]`` /
+    ``respond <text>`` / ``edit <json>``."""
+    required, kind = _DECISION_ARGS.get(verb, _DECISION_ARGS_DEFAULT)
+    if kind is None:
+        return verb
+    return f"{verb} <{kind}>" if required else f"{verb} [<{kind}>]"
+
+
+def _format_interrupt_notice(frame: dict[str, Any], *, repl: bool = False) -> str:
     """Render the concise human-mode notice for an ``interrupt`` turn.
 
     ASCII-only on purpose: this is CLI chrome that must survive a cp1252 (strict)
     console/pipe unmangled (the same constraint the em-dash-free ``--help`` and the
     ``_write_safe`` guard enforce), so no ``U+23F8`` pause glyph. Names the pending
-    action(s) and the decisions the frame advertises, and points at the resume path
-    without over-claiming (answering inline isn't wired yet — gh #58 part 2)."""
+    action(s) and the decisions the frame advertises.
+
+    The closing line depends on WHO can answer (gh #63): one-shot ``--message`` has no
+    way to answer (the process exits), so it points at the raw ``decision`` command;
+    ``--repl`` CAN answer inline, so it prints the literal syntax to type — built from
+    this frame's own advertised verbs, never a hard-coded list, so an interrupt that
+    allows only ``approve``/``reject`` never advertises ``edit``."""
     actions = _interrupt_actions(frame)
-    allowed = [str(d) for d in (frame.get("allowed_decisions") or [])]
+    allowed = _interrupt_allowed(frame)
     lines = ["interrupt: agent paused awaiting a decision"]
     detail = []
     if actions:
@@ -303,7 +351,15 @@ def _format_interrupt_notice(frame: dict[str, Any]) -> str:
         detail.append("allowed: " + " | ".join(allowed))
     if detail:
         lines.append("  " + "   ".join(detail))
-    lines.append("  resume by sending a `decision` command (add --json to see the full request)")
+    if not repl:
+        lines.append("  resume by sending a `decision` command (add --json to see the full request)")
+        return "\n".join(lines) + "\n"
+    lines.append(
+        f"  answer it here: `{_DECISION_CMD} <verb>` (or a bare `<verb>`) using a verb above"
+    )
+    payloads = [_decision_usage(v) for v in allowed if _DECISION_ARGS.get(v, _DECISION_ARGS_DEFAULT)[1]]
+    if payloads:
+        lines.append("  payloads: " + " | ".join(payloads))
     return "\n".join(lines) + "\n"
 
 
@@ -334,6 +390,11 @@ class _OneShotSink:
     so a non-Latin-1 char in the reply still degrades to an escape on a cp1252 stdout
     instead of crashing (gh #51 holds after the switch to streaming).
     """
+
+    # Whether the interrupt notice should advertise the inline `--repl` answer syntax
+    # (gh #63). False here: a one-shot `--message` process exits at turn_end, so it can
+    # only point at the raw `decision` command. `_ReplSink` flips it.
+    _interrupt_answerable = False
 
     def __init__(self, out: TextIO, err: TextIO, *, as_json: bool) -> None:
         self._out = out
@@ -394,7 +455,10 @@ class _OneShotSink:
             # notice on stderr (stdout stays the clean reply channel, exactly like the
             # error path) so a paused agent isn't invisible. The full request is on the
             # --json stream for a consumer that needs the payload.
-            _write_safe(self._err, _format_interrupt_notice(frame))
+            _write_safe(
+                self._err,
+                _format_interrupt_notice(frame, repl=self._interrupt_answerable),
+            )
             self._err.flush()
 
     def close_reply(self) -> None:
@@ -408,8 +472,96 @@ class _OneShotSink:
 
 # Lines that end the interactive --repl session. `:quit` is the documented one
 # (see the flag help + README); `:q`/`:exit` are conventional REPL aliases accepted
-# for muscle memory. A bare EOF (Ctrl-D / closed stdin) ends the session too.
+# for muscle memory. A bare EOF (Ctrl-D / closed stdin) ends the session too. These
+# are checked BEFORE decision parsing, so `:quit` still works while an interrupt is
+# pending — the always-available way out of a paused session (gh #63).
 _REPL_QUIT = frozenset({":quit", ":q", ":exit"})
+
+
+def _parse_repl_decision(
+    text: str, allowed: list[str]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse one ``--repl`` answer line into a single decision dict.
+
+    Returns ``(decision, None)`` on success or ``(None, reason)`` on refusal — the
+    caller surfaces ``reason`` on stderr and re-prompts, so an unparseable answer is
+    never silently downgraded to a fresh ``message`` (today's bug, gh #63) nor
+    swallowed.
+
+    ``text`` is the answer with any ``:decision`` prefix already stripped: a verb plus
+    an optional payload. ``allowed`` is the pending frame's own ``allowed_decisions``
+    and is the ONLY source of which verbs are valid — a verb the interrupt didn't
+    advertise is refused even if it is a canonical HITL verb. Verb matching is
+    case-insensitive but the decision carries the frame's spelling.
+
+    Payload grammar (see ``_DECISION_ARGS``):
+
+    - no payload -> ``{"type": verb}`` (``approve``);
+    - a JSON object -> merged into the decision, so the full typed shapes are reachable
+      (``edit {"edited_action": {"name": "x", "args": {}}}``); the verb always wins the
+      ``type`` key;
+    - any other text -> ``{"type": verb, "message": text}`` (``respond``/``reject``,
+      whose langchain shapes carry exactly a ``message``).
+    """
+    verb, _, payload = text.partition(" ")
+    payload = payload.strip()
+    match = next((a for a in allowed if a.lower() == verb.lower()), None)
+    if match is None:
+        return None, f"`{verb}` is not a decision this interrupt allows"
+
+    required, kind = _DECISION_ARGS.get(match, _DECISION_ARGS_DEFAULT)
+    if kind is None and payload:
+        # `approve some junk` is a typo or a misunderstanding, not an approval with a
+        # note — refuse rather than send a decision carrying a field the shape has no
+        # room for.
+        return None, f"`{match}` takes no payload (got {payload!r})"
+    if required and not payload:
+        return None, f"`{match}` needs a payload -- {_decision_usage(match)}"
+    if not payload:
+        return {"type": match}, None
+    if kind == "json" or payload.startswith("{"):
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            return None, f"`{match}` payload is not valid JSON: {exc}"
+        if not isinstance(obj, dict):
+            return None, f"`{match}` payload must be a JSON object -- {_decision_usage(match)}"
+        return {**obj, "type": match}, None
+    return {"type": match, "message": payload}, None
+
+
+def _decision_refusal_notice(
+    text: str, reason: str, allowed: list[str], *, pending: bool
+) -> str:
+    """The stderr note for a ``--repl`` line that could not be answered as a decision.
+
+    Obvious (names what was typed and why it was refused) and recoverable (says what
+    state the session is actually in and what to type next) — the two halves of the
+    "never silently misinterpret" contract (gh #63).
+
+    ``pending`` picks which recovery hint is true: with an interrupt still pending, the
+    next line gets another try, so repeat the syntax and the verbs THIS frame
+    advertises plus the way out; with nothing pending (an explicit ``:decision`` typed
+    out of context) there is nothing to answer, so say so and point back at plain chat.
+
+    The chrome is ASCII-only (same cp1252 rule as the interrupt notice); the echoed
+    input is whatever the user typed, and the ``_write_safe`` writer guards that."""
+    lines = [f"not a decision: {text!r} -- {reason}"]
+    if pending:
+        hint = (
+            "  the interrupt is still pending -- answer with "
+            f"`{_DECISION_CMD} <verb>` or a bare `<verb>`"
+        )
+        if allowed:
+            hint += ": " + " | ".join(_decision_usage(v) for v in allowed)
+        lines.append(hint)
+        lines.append("  (`:quit` ends the session and leaves the interrupt unanswered)")
+    else:
+        lines.append(
+            f"  `{_DECISION_CMD}` answers a pending HITL interrupt; nothing is paused right "
+            "now, so send a plain line to chat"
+        )
+    return "\n".join(lines) + "\n"
 
 
 class _ReplSink(_OneShotSink):
@@ -427,23 +579,45 @@ class _ReplSink(_OneShotSink):
     ``turn_end`` is forwarded verbatim like any other frame (the base class already
     does that), so the raw NDJSON stream is unbroken for a scripting consumer.
 
-    An interrupt turn in a REPL session is surfaced (the inherited stderr notice) but
-    does NOT end the interactive session — like a per-turn ``error``, it is visible but
-    non-fatal. Answering the interrupt inline (mapping the next input line to a
-    ``decision`` on the live session, gh #58 part 2) is intentionally still future
-    work; today the next line starts a fresh turn.
+    An interrupt turn in a REPL session is surfaced (the stderr notice) but does NOT
+    end the interactive session — like a per-turn ``error``, it is visible but
+    non-fatal. It also leaves the session in a PENDING state (gh #63): the frame is
+    kept in ``pending_interrupt`` so the REPL loop knows the next line must answer it
+    (via ``decision``) rather than start a fresh ``message`` turn, and so
+    ``_run_repl`` can tell an answered interrupt from one abandoned at exit.
+
+    ``pending_interrupt`` tracks the LIVE session's state off the frames themselves:
+    every ``ack`` (a new command was accepted) clears it and an ``interrupt`` sets it,
+    so a resumed turn that interrupts AGAIN correctly stays pending, and a resumed turn
+    that completes clears. ``run()`` writes frames synchronously into this sink and only
+    then pulls the next input line, so by the time the REPL loop reads this attribute it
+    already reflects the finished turn.
+
+    The interrupt notice differs from the one-shot one here: ``--repl`` CAN answer, so
+    it prints the literal syntax to type instead of pointing at the raw protocol.
     """
+
+    _interrupt_answerable = True  # the notice advertises the inline answer syntax
 
     def __init__(self, out: TextIO, err: TextIO, *, as_json: bool) -> None:
         super().__init__(out, err, as_json=as_json)
         self.turns = 0  # number of turn_end boundaries seen (a driven turn ran)
+        # The interrupt frame this session is currently paused on, or None. See above.
+        self.pending_interrupt: dict[str, Any] | None = None
 
     def _on_frame(self, line: str) -> None:
         try:
             frame = json.loads(line)
         except json.JSONDecodeError:
             return
-        if frame.get("type") == "turn_end":
+        ftype = frame.get("type")
+        if ftype == "ack":
+            # A command was accepted: whatever this session was paused on is being
+            # acted on now (a `decision` answers it; a `message` starts a fresh turn).
+            self.pending_interrupt = None
+        elif ftype == "interrupt":
+            self.pending_interrupt = frame
+        if ftype == "turn_end":
             self.turns += 1
             if not self._as_json:
                 # Close the finished reply (trailing newline iff it printed anything)
@@ -488,10 +662,37 @@ def _run_repl(
     streaming, or ``_write_safe`` plumbing is duplicated. ``--json`` composes with it
     (raw ``event_to_dict`` frames instead of assembled text), same as ``--message``.
 
-    Exit 0 on a clean EOF/``:quit`` termination (per-turn ``error`` frames are
-    surfaced to stderr but don't fail the session — it's interactive, not one-shot);
-    non-zero only if the agent could not even start a turn (e.g. a non-runnable spec,
-    where ``run()`` emits an ``error`` and returns before any ``turn_end``).
+    **Answering a HITL interrupt inline (gh #63).** When a turn ends on an
+    ``interrupt``, the session is PENDING (``_ReplSink.pending_interrupt``) and the loop
+    switches to DECISION MODE for the next line: it becomes a
+    ``{"type": "decision", "session_id": ..., "decisions": [...]}`` command on the SAME
+    session (so it lands on that thread's pending interrupt) instead of a fresh
+    ``message``. This completes the ``interrupt`` -> ``decision`` round-trip from the
+    CLI, which previously required hand-writing NDJSON over the raw protocol. The mode
+    is explicit both ways:
+
+    - ``:decision <verb> [payload]`` — the explicit form, in the same ``:``-prefixed
+      namespace as ``:quit``, and the form the interrupt notice tells you to type. Used
+      outside decision mode it is refused ("no interrupt is pending"), never sent as
+      chat text.
+    - a BARE ``<verb>`` — accepted only while pending, because that is the only state
+      in which it is unambiguous. Outside decision mode a bare ``approve`` is ordinary
+      chat text and still starts a normal turn, exactly as before.
+
+    While pending, EVERY line is an answer attempt (``:quit`` excepted): one that
+    doesn't parse into a verb the frame advertises is REFUSED on stderr and re-prompted,
+    with the interrupt left pending. It is deliberately never downgraded to a fresh
+    ``message`` — that silent downgrade is the gh #63 bug (the message just re-interrupts,
+    so the answer looks accepted and the round-trip never completes).
+
+    Exit codes: ``1`` if the agent could not even start a turn (e.g. a non-runnable
+    spec, where ``run()`` emits an ``error`` and returns before any ``turn_end``); ``2``
+    if the session ended (EOF/``:quit``) with an interrupt still PENDING — the same
+    "paused awaiting a decision" signal one-shot ``--message`` has carried since gh #58,
+    now that ``--repl`` is able to answer and so leaving one unanswered is a real
+    outcome; otherwise ``0``, including a turn that interrupted and WAS answered, and a
+    session that merely had a bad turn (per-turn ``error`` frames are surfaced to stderr
+    but don't fail an interactive session).
     """
     import sys
 
@@ -505,13 +706,38 @@ def _run_repl(
         show_prompt = (not as_json) and bool(isatty and isatty())
 
     lines = iter(stdin)
+    sink = _ReplSink(stdout, stderr, as_json=as_json)
+
+    def refuse(text: str, reason: str, frame: dict[str, Any] | None) -> None:
+        """Surface a refused answer line on stderr (stdout stays the reply/NDJSON
+        channel, exactly like the error and interrupt notices) and leave any pending
+        interrupt pending, so the next line gets another try."""
+        _write_safe(
+            stderr,
+            _decision_refusal_notice(
+                text,
+                reason,
+                _interrupt_allowed(frame or {}),
+                pending=frame is not None,
+            ),
+        )
+        stderr.flush()
 
     def commands() -> Iterable[str]:
         """Translate REPL input lines into NDJSON commands for run(), lazily — so
-        the prompt for turn N+1 is drawn only after turn N's reply has streamed."""
+        the prompt for turn N+1 is drawn only after turn N's reply has streamed.
+
+        Laziness is also what makes decision mode correct: ``run()`` pulls the next
+        line only after the previous turn's frames have gone through the sink, so
+        ``sink.pending_interrupt`` here already reflects the finished turn."""
         while True:
+            # Read the live session's state fresh each iteration: an interrupt from the
+            # turn that just finished puts this line in decision mode (gh #63).
+            pending = sink.pending_interrupt
             if show_prompt:
-                _write_safe(stderr, prompt)
+                # A distinct prompt makes the mode switch visible at a TTY, on top of
+                # the notice the interrupt already printed.
+                _write_safe(stderr, ("decision" + prompt) if pending else prompt)
                 stderr.flush()
             line = next(lines, None)
             if line is None:  # EOF (Ctrl-D / closed stdin): end the session.
@@ -523,20 +749,66 @@ def _run_repl(
             text = line.strip()
             if not text:
                 continue  # blank line: re-prompt, don't drive an empty-content turn
+            # Checked first, so `:quit` is always available — including as the way out
+            # of a pending interrupt you don't want to answer.
             if text in _REPL_QUIT:
                 yield json.dumps({"type": "shutdown"})
                 return
+
+            explicit = text == _DECISION_CMD or text.startswith(_DECISION_CMD + " ")
+            if explicit or pending is not None:
+                # Decision mode. Either the user asked for it explicitly with
+                # `:decision ...`, or an interrupt is pending and EVERY line is an
+                # answer attempt. A line that doesn't parse is refused out loud and
+                # re-prompted — never silently downgraded to a `message` (which would
+                # just re-interrupt and look like it worked, the gh #63 bug) and never
+                # swallowed.
+                answer = text[len(_DECISION_CMD):].strip() if explicit else text
+                if pending is None:
+                    refuse(text, "no interrupt is pending", None)
+                    continue
+                if not answer:
+                    refuse(text, f"`{_DECISION_CMD}` needs a verb", pending)
+                    continue
+                decision, reason = _parse_repl_decision(
+                    answer, _interrupt_allowed(pending)
+                )
+                if decision is None:
+                    refuse(text, reason or "unparseable", pending)
+                    continue
+                # Same session_id (hence thread_id) as the turn that interrupted, so
+                # the decision resumes THAT pending interrupt (gh #63).
+                yield json.dumps(
+                    {
+                        "type": "decision",
+                        "session_id": session_id,
+                        "decisions": [decision],
+                    }
+                )
+                continue
+
             yield json.dumps(
                 {"type": "message", "session_id": session_id, "content": text}
             )
 
-    sink = _ReplSink(stdout, stderr, as_json=as_json)
     run(graph, commands(), sink, spec=spec)
 
     # A pre-loop failure (e.g. a non-runnable spec) emits an error before any turn
     # ran, so no turn_end was seen — treat that as a hard start failure (exit 1),
-    # mirroring --message. A clean session that merely had a bad turn exits 0.
-    return 1 if (sink.saw_error and sink.turns == 0) else 0
+    # mirroring --message.
+    if sink.saw_error and sink.turns == 0:
+        return 1
+    # The session ended while the agent was still paused awaiting a decision: the same
+    # "unanswered interrupt" signal --message has exited 2 on since gh #58. Before gh #63
+    # --repl could not answer, so an interrupt was purely informational and this was 0;
+    # now that answering is a first-class REPL action, walking away from one is a real,
+    # scriptable outcome (`printf 'do it\napprove\n' | ... --repl; echo $?` -> 0 proves
+    # the round-trip completed; 2 proves it did not).
+    if sink.pending_interrupt is not None:
+        return 2
+    # Clean termination — including an interrupt that WAS answered and resumed, and a
+    # session that merely had a bad turn.
+    return 0
 
 
 def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> int:
@@ -630,8 +902,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Interactive multi-turn REPL: read one prompt per line, drive a turn, print the "
         "reply, and loop over ONE long-lived session (same session_id) so a checkpointer-backed "
         "agent remembers prior turns. The multi-turn companion to --message; verifies "
-        "conversational memory from the CLI. Exit with EOF (Ctrl-D) or a ':quit' line. "
-        "Pair with --json for raw event frames.",
+        "conversational memory from the CLI. If a turn pauses on a HITL interrupt, answer it "
+        "inline with ':decision <verb>' (or a bare verb) to resume the same session. "
+        "Exit with EOF (Ctrl-D) or a ':quit' line (0 clean, 2 if an interrupt was left "
+        "unanswered). Pair with --json for raw event frames.",
     )
     parser.add_argument(
         "--json",

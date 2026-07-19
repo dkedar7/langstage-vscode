@@ -35,7 +35,8 @@ It has two parts in one repo:
 > **Status: early.** The extension is not yet on the VS Code Marketplace (run
 > it from source for now), and interactive approval of human-in-the-loop
 > interrupts is not wired into the chat UI yet (the sidecar already supports
-> the round-trip).
+> the round-trip, and [`--repl`](#configure) can drive it end to end from the
+> CLI).
 
 ## Every stage for your LangGraph agent
 
@@ -164,9 +165,41 @@ $ echo $?
 ```
 
 With `--json`, the raw `{"type": "interrupt", ...}` frame streams on stdout, so a consumer keys
-on it directly. Answering the interrupt to resume the round-trip is a `decision` command over the
-raw stdio protocol (`{"type": "decision", "session_id": "...", "decisions": [{"type": "approve"}]}`);
-answering it *inline* from `--repl` is not wired yet.
+on it directly.
+
+**`--repl` can also *answer* the interrupt**, completing the `interrupt` → `decision` round-trip
+without hand-writing the stdio protocol. When a turn ends on an interrupt, the session enters
+**decision mode**: the next line becomes a `decision` on the *same* session, so it resumes that
+thread's pending interrupt.
+
+```console
+$ printf 'do it\napprove\n:quit\n' | langstage-vscode-sidecar --agent ./hitl.py:graph --repl
+interrupt: agent paused awaiting a decision
+  action: confirm   allowed: reject | edit | respond | approve
+  answer it here: `:decision <verb>` (or a bare `<verb>`) using a verb above
+  payloads: reject [<text>] | edit <json> | respond <text>
+resumed with: {'decisions': [{'type': 'approve'}]}
+```
+
+- Type **`:decision <verb>`** (same `:`-prefixed namespace as `:quit`), or just the **bare verb** —
+  a bare verb is only read as a decision *while an interrupt is pending*; the rest of the time
+  `approve` is ordinary chat text.
+- The verbs come from **that interrupt's own `allowed_decisions`**, so an approval-only agent
+  offers and accepts exactly `reject | approve`. Payloads follow the LangChain HITL decisions:
+  `approve`, `reject [<text>]`, `respond <text>`, `edit <json>` (free text becomes `message`, a
+  JSON object is merged in, e.g. `edit {"edited_action": {"name": "confirm", "args": {}}}`).
+- While an interrupt is pending, a line that **isn't** a valid decision is **refused on stderr and
+  re-prompted** with the interrupt left pending — it is never silently sent as a new message (which
+  would just re-interrupt and look accepted) and never swallowed. `:quit` is always the way out.
+- `--json` composes: the answer line emits `ack` with `"ref": "decision"`, so the trace reads
+  `ready → ack message → interrupt → turn_end → ack decision → content → turn_end`.
+- **`--repl` exit codes:** `0` on a clean session (including an interrupt that *was* answered),
+  `1` if the agent could not start at all, and **`2`** if the session ends with an interrupt still
+  unanswered — the same "paused awaiting a decision" signal `--message` uses.
+
+You can still drive `decision` over the raw stdio protocol directly
+(`{"type": "decision", "session_id": "...", "decisions": [{"type": "approve"}]}`) — that is what
+the VS Code extension does, since interactive approval is not wired into the chat UI yet.
 
 Your agent is any LangGraph `CompiledGraph` (e.g. from `deepagents`), exported
 under the name in the spec:
