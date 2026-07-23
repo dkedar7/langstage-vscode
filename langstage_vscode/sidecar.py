@@ -109,6 +109,16 @@ def run(
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
         return
 
+    # Per-session pending-interrupt state, tracked off the frames this loop emits —
+    # the raw-protocol analogue of ``_ReplSink.pending_interrupt`` (gh #63). A turn
+    # that ends on an ``interrupt`` leaves its session PENDING; the next turn on that
+    # session (a resume that completes, or a fresh message) clears it. A ``decision``
+    # for a session with nothing pending has no interrupt to resume, so it must error
+    # rather than ack + drive a spurious turn (gh #65 — the non-empty sibling of the
+    # empty-list case gh #33 already closed). Keyed per session_id/thread because the
+    # sidecar can hold several sessions at once.
+    pending_interrupts: set[str] = set()
+
     for raw in stdin:
         line = raw.strip()
         if not line:
@@ -143,15 +153,30 @@ def run(
             if not isinstance(decisions, list) or not decisions:
                 emit({"type": "error", "error": "decision requires a non-empty 'decisions' list"})
                 continue
+            # ...and a well-formed decision still needs an interrupt to resume: if this
+            # session has none pending, there is nothing to resume, so error rather than
+            # ack + drive a spurious turn (the invariant the gh #33 comment states, for
+            # the non-empty case it left open). (gh #65)
+            if session_id not in pending_interrupts:
+                emit({"type": "error",
+                      "error": f"no interrupt pending for session {session_id!r}"})
+                continue
             emit({"type": "ack", "ref": "decision"})
             agui_resume = {"decisions": decisions}
         else:
             emit({"type": "error", "error": f"unknown command type: {ctype!r}"})
             continue
 
-        _run_turn_agui(
+        saw_interrupt = _run_turn_agui(
             agui_agent, agui_message, agui_resume, config, max_result_len, emit
         )
+        # gh #65: this turn's interrupt-or-not is the session's new pending state — an
+        # interrupt turn leaves it PENDING; anything else (a normal turn, or a resume
+        # that completed) clears it.
+        if saw_interrupt:
+            pending_interrupts.add(session_id)
+        else:
+            pending_interrupts.discard(session_id)
         emit({"type": "turn_end", "session_id": session_id})
 
 
@@ -162,12 +187,16 @@ def _run_turn_agui(
     config: dict[str, Any],
     max_result_len: int,
     emit: Callable[[dict[str, Any]], None],
-) -> None:
+) -> bool:
     """Stream one turn through the in-process AG-UI adapter, emitting
-    ``event_to_dict``-shaped frames (the sidecar's only streaming path, ADR 0003)."""
+    ``event_to_dict``-shaped frames (the sidecar's only streaming path, ADR 0003).
+
+    Returns whether the turn emitted an ``interrupt`` frame, so the caller can leave
+    the session paused awaiting a decision (gh #65)."""
     from .agui_stream import stream_events_sync
 
     thread_id = config.get("configurable", {}).get("thread_id", "default")
+    saw_interrupt = False
     try:
         for frame in stream_events_sync(
             agent,
@@ -176,9 +205,12 @@ def _run_turn_agui(
             resume=resume,
             max_result_len=max_result_len,
         ):
+            if frame.get("type") == "interrupt":
+                saw_interrupt = True
             emit(frame)
     except Exception as exc:  # noqa: BLE001 — surfaced to the client as an event
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
+    return saw_interrupt
 
 
 # The keyless echo agent shipped with the shared core — see `--demo`.

@@ -1261,3 +1261,64 @@ def test_repl_bare_verb_with_nothing_pending_is_still_an_ordinary_message():
     assert rc == 0
     assert "You said: approve" in out
     assert err == ""
+
+
+# ── gh #65: a valid `decision` with NO pending interrupt must error ──────────
+#
+# gh #33 closed the empty-list half (`decisions: []`) — a decision that is invalid by
+# SHAPE. gh #65 is the non-empty sibling: a well-formed `decisions: [{"type":"approve"}]`
+# arriving on a thread that was never interrupted still has no interrupt to resume, so
+# it must emit the same `error` frame (the invariant the #33 comment already states) —
+# not ack + drive a spurious turn that ends in a false `complete`. The raw run() path
+# now tracks pending-interrupt state per session_id/thread off its own emitted frames.
+
+
+def test_decision_with_no_pending_interrupt_errors_not_spurious_turn():
+    # gh #65: the headline. A valid decision on a fresh, never-interrupted session is
+    # answered with an `error` frame and drives NO turn — no ack, no content, no
+    # (false) `complete`, no turn_end. Contrast the #33 empty-list case, which errors
+    # on shape; this one is well-shaped but has nothing to resume.
+    events = drive(_stub(), [
+        {"type": "decision", "session_id": "fresh", "decisions": [{"type": "approve"}]},
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "no interrupt pending for session 'fresh'" in e["error"]
+               for e in events), [e for e in events if e["type"] == "error"]
+    assert not any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
+    assert not any(e["type"] == "turn_end" for e in events)
+    assert not any(e["type"] == "complete" for e in events)
+    assert not any(e["type"] == "content" for e in events)
+
+
+def test_decision_pending_state_is_keyed_per_session():
+    # gh #65: the fix must be keyed to the RIGHT thread — the sidecar can hold several
+    # sessions. A message that interrupts session A leaves ONLY A pending: the same
+    # decision resumes A but still errors on a never-interrupted session B.
+    events = drive(_interrupt_graph(), [
+        {"type": "message", "session_id": "A", "content": "go"},                       # A interrupts
+        {"type": "decision", "session_id": "B", "decisions": [{"type": "approve"}]},    # B never paused
+        {"type": "decision", "session_id": "A", "decisions": [{"type": "approve"}]},    # A resumes
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "no interrupt pending for session 'B'" in e["error"]
+               for e in events)
+    # A's decision is acted on and the turn resumes with the decision payload intact.
+    assert any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
+    text = "".join(e.get("content", "") for e in events if e["type"] == "content")
+    assert "resumed with" in text and "approve" in text
+
+
+def test_decision_rejected_after_the_interrupt_was_already_answered():
+    # gh #65: pending state clears once the interrupt is resumed and the turn completes,
+    # so a SECOND decision (a double-send, or one after the interrupt already cleared)
+    # has nothing to resume and must error — exactly the "double-send" case the issue
+    # names — rather than drive another spurious turn.
+    events = drive(_interrupt_graph(), [
+        {"type": "message", "session_id": "s", "content": "go"},                       # interrupts
+        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},    # resumes -> completes
+        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},    # nothing pending now
+        {"type": "shutdown"},
+    ])
+    acks = [e for e in events if e.get("type") == "ack" and e.get("ref") == "decision"]
+    assert len(acks) == 1  # only the first decision was acted on
+    assert any(e["type"] == "error" and "no interrupt pending" in e["error"] for e in events)

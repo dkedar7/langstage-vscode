@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.19] - 2026-07-23
+
+### Fixed
+- **A well-formed `decision` sent with no pending interrupt no longer drives a spurious turn on the
+  raw stdio path (gh #65) — the non-empty sibling of gh #33.** gh #33 made a `decision` with an
+  empty `decisions: []` error instead of ack + drive a turn, but it only closed the *shape* half:
+  the guard checked that `decisions` is a non-empty list and stopped there. A perfectly well-formed
+  `decisions: [{"type": "approve"}]` arriving on a thread that was **never interrupted** still
+  slipped through and was ack'd + driven — a spurious empty-input turn that, depending on the agent,
+  either reported a false `complete` (the client is told the decision was applied when nothing was
+  resumed) or leaked a raw internal error (e.g. `IndexError` from a node reading `messages[-1]`).
+  That is exactly the "there's no interrupt to resume, so it must error" invariant the gh #33 code
+  comment *states* but did not enforce for the non-empty case. The raw `run()` loop now tracks
+  pending-interrupt state **per `session_id`/thread**, off the frames it emits — the raw-protocol
+  analogue of `_ReplSink.pending_interrupt` (gh #63): a turn that ends on an `interrupt` leaves that
+  session PENDING, and the next turn on it (a resume that completes, or a fresh message) clears it.
+  A `decision` for a session with nothing pending now emits `error`
+  (`no interrupt pending for session '…'`) and drives no turn — no ack, no content, no false
+  `complete`. The `#63` `--repl` decision layer already guarded this; the raw path now matches. The
+  extension is unaffected (it only sends a `decision` in response to an interrupt), but a client
+  hand-driving the documented protocol reaches it directly.
+
 ## [0.5.18] - 2026-07-19
 
 ### Added
