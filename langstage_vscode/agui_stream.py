@@ -93,6 +93,21 @@ def stream_events_sync(agent, message, thread_id, *, resume=None, max_result_len
         # pending athrow task alive, and asyncio logs "Task was destroyed but it is
         # pending!" to stderr. For a stdio sidecar that stderr is exactly where stray
         # output must not go (gh #40, Defect 2).
+        #
+        # When the consumer stops the turn MID-stream — a `cancel` command (gh #67) or
+        # any early break — the ag-ui run task is still actively driving the graph, so
+        # aclose()ing the generator it feeds would try to close an async generator that
+        # is "already running" and asyncio prints that failure to stderr. Cancel every
+        # still-pending task and let it unwind FIRST, so by the time we aclose there is
+        # nothing driving the inner generators and the teardown stays silent.
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            pass
         try:
             loop.run_until_complete(agen.aclose())
         except Exception:  # noqa: BLE001 - best-effort teardown

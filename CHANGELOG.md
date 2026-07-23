@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ## [0.5.19] - 2026-07-23
 
+### Added
+- **A cooperative per-turn `cancel` command: stop an in-flight turn WITHOUT tearing down the
+  session and its in-process checkpointer (gh #67).** The stdio protocol had exactly three
+  client->sidecar commands — `message`, `decision`, `shutdown` — and **no way to abort a running
+  turn**. So the only way the extension could honor a "stop" in the chat UI was to **kill the whole
+  sidecar process** (`disposeSidecar()`), which throws away the long-lived session and its
+  in-process `MemorySaver` — cancelling one slow turn silently reset the entire conversation's
+  memory (the very thing gh #54 keeps one process alive to preserve), and paid a full interpreter +
+  agent reload on the next turn. The extension's own code said as much in a comment. Now a fourth
+  command aborts just the current turn:
+
+  ```jsonc
+  {"type": "cancel", "session_id": "s1"}
+  ```
+
+  - **It stops the streaming turn cooperatively.** The raw stdio loop is single-threaded and, while
+    pumping a turn's frames, never reads stdin — so on that path a background reader now surfaces a
+    `cancel` mid-turn. Between frames the turn checks for it and, when it arrives, closes the AG-UI
+    stream; the generator's existing `finally: aclose()` cancels the pending ag-ui run task (the
+    same early-stop that already ran on process teardown, gh #40), leaving the graph's
+    session/thread and checkpointer **untouched**.
+  - **It emits a distinct terminal frame.** A cancelled turn is `cancelled -> turn_end`, with **no**
+    `complete` — mirroring the "there is no `complete` on a non-success terminal turn" contract, so a
+    client never confuses a cancel with a clean turn or an error.
+  - **The session survives, so the next turn keeps memory.** The process is not torn down; a
+    subsequent `message` on the same `session_id` resumes with prior context intact (verified
+    end-to-end: warm up a turn, cancel a long streaming turn, then a third turn still remembers the
+    first).
+  - **A `cancel` with nothing in flight is refused cleanly** — an `error` frame
+    (`no turn in progress for session '…'`), consistent with how the `decision`/`message` guards
+    reject un-actionable commands (cf. gh #33/#65), rather than acking or crashing (it used to be an
+    `unknown command type: 'cancel'` error). This ships the sidecar half; the extension can now send
+    `cancel` from `onCancellationRequested` instead of `disposeSidecar()`, so "stop" stops the turn
+    without erasing the conversation.
+
 ### Fixed
 - **A well-formed `decision` sent with no pending interrupt no longer drives a spurious turn on the
   raw stdio path (gh #65) — the non-empty sibling of gh #33.** gh #33 made a `decision` with an

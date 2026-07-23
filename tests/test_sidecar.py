@@ -1322,3 +1322,53 @@ def test_decision_rejected_after_the_interrupt_was_already_answered():
     acks = [e for e in events if e.get("type") == "ack" and e.get("ref") == "decision"]
     assert len(acks) == 1  # only the first decision was acted on
     assert any(e["type"] == "error" and "no interrupt pending" in e["error"] for e in events)
+
+
+# ── gh #67: cooperative per-turn `cancel` ────────────────────────────────────
+#
+# A `cancel` stops the in-flight turn WITHOUT tearing down the process, so the
+# long-lived session + in-process checkpointer survive (the mid-stream cancel + memory
+# survival is exercised end-to-end in test_agui_sidecar.py, which has the streaming
+# fixtures). Here: the command is known (not "unknown command type"), and a cancel with
+# nothing in flight is refused cleanly rather than crashing or acking.
+
+
+def test_cancel_with_no_turn_in_flight_errors_gracefully():
+    # gh #67: `cancel` is now a known command. With no turn streaming for the session it
+    # gets a clean `error` (like the decision/message guards) — not the old
+    # "unknown command type: 'cancel'", and not a crash or an ack.
+    events = drive(_stub(), [
+        {"type": "cancel", "session_id": "s"},
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "no turn in progress for session 's'" in e["error"]
+               for e in events), [e for e in events if e["type"] == "error"]
+    assert not any("unknown command" in e.get("error", "") for e in events)
+    assert not any(e["type"] in ("cancelled", "ack", "turn_end") for e in events)
+
+
+def test_run_turn_cooperative_cancel_stops_stream_before_complete():
+    # gh #67: the streaming primitive. With a cancel requested between frames,
+    # _run_turn_agui stops the turn early — emitting NO `complete` — and reports
+    # cancelled. An injected should_cancel makes this deterministic without threads:
+    # it lets the first frame through, then fires.
+    from langstage_vscode.agui_stream import build_session_agent
+    from langstage_vscode.sidecar import _run_turn_agui
+
+    agent = build_session_agent(_stub())
+    emitted: list = []
+    calls = {"n": 0}
+
+    def should_cancel() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 2  # frame 1 passes; cancel before frame 2
+
+    saw_interrupt, cancelled = _run_turn_agui(
+        agent, "hi there", None, {"configurable": {"thread_id": "s"}}, 50_000,
+        emitted.append, should_cancel=should_cancel,
+    )
+    assert cancelled is True
+    assert saw_interrupt is False
+    types = [f.get("type") for f in emitted]
+    assert "complete" not in types  # cancelled before the turn's own `complete`
+    assert calls["n"] >= 2

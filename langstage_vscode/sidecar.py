@@ -9,6 +9,7 @@ TS extension's dispatcher renders them the same way.
 Commands (client -> sidecar), one JSON object per line:
     {"type": "message",  "session_id": "s1", "content": "..."}
     {"type": "decision", "session_id": "s1", "decisions": [{"type": "approve"}]}
+    {"type": "cancel",   "session_id": "s1"}   # abort the in-flight turn, keep the session
     {"type": "shutdown"}
 
 Events (sidecar -> client), one JSON object per line:
@@ -24,11 +25,16 @@ from __future__ import annotations
 
 import json
 import os
+from collections import deque
 from typing import Any, Callable, Iterable, TextIO
 
 from langstage_core import apply_workspace, load_agent_spec, workspace_root
 
 DEFAULT_MAX_RESULT_LEN = 50_000
+
+# Sentinel returned by the command intake when the input stream is exhausted (EOF /
+# closed stdin), so an ordinary line and "no more commands" are never confused.
+_EOF = object()
 
 
 def _write_safe(stream: TextIO, text: str) -> None:
@@ -67,6 +73,90 @@ def _runnable_graph_error(graph: Any, spec: str | None = None) -> str | None:
     )
 
 
+class _CommandIntake:
+    """Feeds ``run()``'s loop one raw command line at a time, in one of two modes.
+
+    DISABLED (every caller except the raw stdio path — ``--repl``/``--message``/
+    ``--selfcheck``): a thin inline iterator over ``stdin``. No threads, so the
+    REPL's lazy generator (which draws prompt N+1 only after turn N's frames have
+    streamed) and the ordered one-shot/selfcheck scripts behave exactly as before.
+
+    ENABLED (the raw stdio path, gh #67): a daemon thread drains ``stdin`` onto a
+    queue so a ``cancel`` can be observed WHILE a turn is streaming — the single-
+    threaded loop is otherwise blocked pumping frames and never reads stdin mid-turn.
+    ``next_command`` still delivers commands in order; ``cancel_check(session_id)``
+    returns a between-frames predicate that pulls whatever is currently queued,
+    returns ``True`` iff a ``cancel`` for the active session is among it, and stashes
+    the rest so they run in order after the turn. A ``cancel`` for a DIFFERENT session
+    is stashed (it has no turn to stop here) and errors as "no turn in progress" when
+    the loop reaches it — the same guard a cancel with nothing in flight gets.
+    """
+
+    def __init__(self, stdin: Iterable[str], *, enabled: bool) -> None:
+        self._enabled = enabled
+        self._deferred: deque[Any] = deque()
+        if not enabled:
+            self._it = iter(stdin)
+            return
+        import queue
+        import threading
+
+        self._queue: "queue.Queue[Any]" = queue.Queue()
+
+        def _pump() -> None:
+            try:
+                for raw in stdin:
+                    self._queue.put(raw)
+            finally:
+                self._queue.put(_EOF)  # unblock the loop's blocking get on EOF
+
+        threading.Thread(target=_pump, daemon=True).start()
+
+    def next_command(self) -> Any:
+        """The next raw command line, or ``_EOF`` when the input is exhausted."""
+        if self._deferred:
+            return self._deferred.popleft()
+        if not self._enabled:
+            return next(self._it, _EOF)
+        return self._queue.get()
+
+    def cancel_check(self, session_id: str) -> Callable[[], bool]:
+        """A predicate ``run()`` calls between turn frames: drain the queue, return
+        True iff a ``cancel`` for ``session_id`` arrived, and defer everything else so
+        the loop processes it in order once the turn ends."""
+        import queue
+
+        def _check() -> bool:
+            found = False
+            while True:
+                try:
+                    nxt = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is _EOF:
+                    self._deferred.append(_EOF)
+                    break
+                if not found and self._is_cancel_for(nxt, session_id):
+                    found = True  # consume the cancel; do not defer it
+                    continue
+                self._deferred.append(nxt)
+            return found
+
+        return _check
+
+    @staticmethod
+    def _is_cancel_for(raw: Any, session_id: str) -> bool:
+        try:
+            cmd = json.loads(raw.strip())
+        except (json.JSONDecodeError, AttributeError):
+            return False
+        return (
+            isinstance(cmd, dict)
+            and cmd.get("type") == "cancel"
+            and cmd.get("session_id", "default") == session_id
+        )
+
+
 def run(
     graph: Any,
     stdin: Iterable[str],
@@ -74,6 +164,7 @@ def run(
     *,
     spec: str | None = None,
     max_result_len: int = DEFAULT_MAX_RESULT_LEN,
+    enable_cancel: bool = False,
     **_legacy: Any,  # accepts + ignores the removed stream_mode/agui kwargs
 ) -> None:
     """Drive the command/event loop over the given streams.
@@ -81,6 +172,11 @@ def run(
     Since langstage-core 1.0 (ADR 0003) turns stream through the in-process AG-UI
     adapter — the only path — emitting ``event_to_dict``-shaped frames so the TS
     extension is unchanged. ``stdin`` is any line iterable; ``stdout`` needs ``write``.
+
+    ``enable_cancel`` (the raw stdio path only) spins up a background reader so a
+    ``cancel`` command can stop an in-flight turn cooperatively — the loop is single-
+    threaded and, while pumping a turn's frames, never reads stdin (gh #67). It is off
+    for every other caller so their synchronous, lazily-pulled input is untouched.
     """
 
     def emit(obj: dict[str, Any]) -> None:
@@ -109,6 +205,8 @@ def run(
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
         return
 
+    intake = _CommandIntake(stdin, enabled=enable_cancel)
+
     # Per-session pending-interrupt state, tracked off the frames this loop emits —
     # the raw-protocol analogue of ``_ReplSink.pending_interrupt`` (gh #63). A turn
     # that ends on an ``interrupt`` leaves its session PENDING; the next turn on that
@@ -119,7 +217,10 @@ def run(
     # sidecar can hold several sessions at once.
     pending_interrupts: set[str] = set()
 
-    for raw in stdin:
+    while True:
+        raw = intake.next_command()
+        if raw is _EOF:
+            break
         line = raw.strip()
         if not line:
             continue
@@ -163,17 +264,31 @@ def run(
                 continue
             emit({"type": "ack", "ref": "decision"})
             agui_resume = {"decisions": decisions}
+        elif ctype == "cancel":
+            # A cancel that reaches the dispatch loop has no turn in flight for this
+            # session — a cancel arriving DURING a turn is consumed by that turn's
+            # cancel check below and never gets here. Reject it cleanly, like the
+            # decision/message guards, rather than acking or crashing. (gh #67)
+            emit({"type": "error",
+                  "error": f"no turn in progress for session {session_id!r}"})
+            continue
         else:
             emit({"type": "error", "error": f"unknown command type: {ctype!r}"})
             continue
 
-        saw_interrupt = _run_turn_agui(
-            agui_agent, agui_message, agui_resume, config, max_result_len, emit
+        should_cancel = intake.cancel_check(session_id) if enable_cancel else None
+        saw_interrupt, cancelled = _run_turn_agui(
+            agui_agent, agui_message, agui_resume, config, max_result_len, emit,
+            should_cancel=should_cancel,
         )
-        # gh #65: this turn's interrupt-or-not is the session's new pending state — an
-        # interrupt turn leaves it PENDING; anything else (a normal turn, or a resume
-        # that completed) clears it.
-        if saw_interrupt:
+        # gh #67: a cancelled turn emits `cancelled` (not `complete`) then `turn_end`,
+        # and leaves the session/checkpointer intact — the next turn keeps memory. gh
+        # #65: otherwise, this turn's interrupt-or-not is the session's new pending
+        # state (an interrupt turn leaves it PENDING; anything else clears it).
+        if cancelled:
+            emit({"type": "cancelled", "session_id": session_id})
+            pending_interrupts.discard(session_id)
+        elif saw_interrupt:
             pending_interrupts.add(session_id)
         else:
             pending_interrupts.discard(session_id)
@@ -187,30 +302,46 @@ def _run_turn_agui(
     config: dict[str, Any],
     max_result_len: int,
     emit: Callable[[dict[str, Any]], None],
-) -> bool:
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> tuple[bool, bool]:
     """Stream one turn through the in-process AG-UI adapter, emitting
     ``event_to_dict``-shaped frames (the sidecar's only streaming path, ADR 0003).
 
-    Returns whether the turn emitted an ``interrupt`` frame, so the caller can leave
-    the session paused awaiting a decision (gh #65)."""
+    Returns ``(saw_interrupt, cancelled)``: whether the turn emitted an ``interrupt``
+    frame (so the session is left paused awaiting a decision, gh #65), and whether it
+    was stopped early by a cooperative ``cancel`` (gh #67).
+
+    ``should_cancel`` (raw stdio path only) is checked between frames; when it fires,
+    the AG-UI generator is closed — its ``finally: aclose()`` cancels the pending
+    ag-ui run task and tears the turn down WITHOUT touching the session/checkpointer,
+    so the next turn on this thread still has memory — and the turn returns cancelled.
+    """
     from .agui_stream import stream_events_sync
 
     thread_id = config.get("configurable", {}).get("thread_id", "default")
     saw_interrupt = False
+    stream = stream_events_sync(
+        agent,
+        message or "",
+        thread_id,
+        resume=resume,
+        max_result_len=max_result_len,
+    )
     try:
-        for frame in stream_events_sync(
-            agent,
-            message or "",
-            thread_id,
-            resume=resume,
-            max_result_len=max_result_len,
-        ):
+        for frame in stream:
+            # gh #67: cooperative cancel. Check before emitting the next frame so a
+            # client `cancel` (surfaced here between frames) stops the stream promptly;
+            # closing the generator runs its teardown and cancels the ag-ui task.
+            if should_cancel is not None and should_cancel():
+                stream.close()
+                return saw_interrupt, True
             if frame.get("type") == "interrupt":
                 saw_interrupt = True
             emit(frame)
     except Exception as exc:  # noqa: BLE001 — surfaced to the client as an event
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
-    return saw_interrupt
+    return saw_interrupt, False
 
 
 # The keyless echo agent shipped with the shared core — see `--demo`.
@@ -1036,7 +1167,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.repl:
         return _run_repl(graph, spec=spec, as_json=args.json)
 
-    run(graph, sys.stdin, sys.stdout, spec=spec)
+    # The raw stdio command loop (what the VS Code extension drives). enable_cancel
+    # spins up the background reader so a `cancel` command can stop an in-flight turn
+    # cooperatively — keeping the long-lived session and its in-process checkpointer —
+    # instead of the extension having to kill the whole sidecar (gh #67).
+    run(graph, sys.stdin, sys.stdout, spec=spec, enable_cancel=True)
     return 0
 
 
