@@ -7,6 +7,7 @@ agent, so these use real compiled graphs.
 """
 import io
 import json
+import time
 from typing import Iterator, List
 
 import pytest
@@ -160,6 +161,109 @@ def test_standard_human_interrupt_list_surfaces_instead_of_crashing():
     # and the round-trip resumes after the decision
     text = "".join(f["content"] for f in frames if f["type"] == "content")
     assert "ok" in text
+
+
+# ── gh #67: cooperative per-turn cancel over the raw stdio path ──────────────
+
+
+class _CountingStreamModel(BaseChatModel):
+    """Streams content chunks. On the human input ``"LONG"`` it streams many chunks
+    slowly (so a mid-stream `cancel` reliably lands between frames); on anything else it
+    streams ``count=<n>`` where n is how many messages it was handed — proof that the
+    thread's checkpointer survived a prior cancel."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "counting-stream"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _stream(self, messages: List[BaseMessage], stop=None, run_manager=None, **kwargs) -> Iterator[ChatGenerationChunk]:
+        from langchain_core.messages import HumanMessage
+
+        last_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+        text = last_human.content if last_human else ""
+        if text == "LONG":
+            for _ in range(2000):
+                time.sleep(0.002)
+                yield ChatGenerationChunk(message=AIMessageChunk(content="x"))
+        else:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"count={len(messages)}"))
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        chunks = list(self._stream(messages))
+        msg = chunks[0].message
+        for c in chunks[1:]:
+            msg = msg + c.message
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=msg.content))])
+
+
+def test_cancel_stops_a_streaming_turn_mid_stream_and_keeps_the_session():
+    # gh #67 end-to-end over the real raw stdio path (enable_cancel=True): a `cancel`
+    # stops an in-flight streaming turn cooperatively — a distinct `cancelled` frame,
+    # then `turn_end`, with NO `complete` — WITHOUT tearing down the process, so the
+    # long-lived session + its in-process checkpointer survive and the next turn keeps
+    # memory. The stdin is gated so the cancel targets the LONG turn (turn 2), exactly
+    # like a well-behaved client that waits for turn_end before sending the next line.
+    import threading
+
+    from langgraph.prebuilt import create_react_agent
+
+    graph = create_react_agent(_CountingStreamModel(), [], checkpointer=InMemorySaver())
+
+    warm_done = threading.Event()   # turn 1 (warmup) finished -> its memory is committed
+    streaming = threading.Event()   # turn 2 (LONG) has started streaming content
+
+    class _GatedStdin:
+        def __iter__(self):
+            yield json.dumps({"type": "message", "session_id": "s", "content": "warmup"})
+            warm_done.wait(15)
+            yield json.dumps({"type": "message", "session_id": "s", "content": "LONG"})
+            streaming.wait(15)
+            yield json.dumps({"type": "cancel", "session_id": "s"})
+            yield json.dumps({"type": "message", "session_id": "s", "content": "again"})
+            yield json.dumps({"type": "shutdown"})
+
+    frames: List[dict] = []
+
+    class _WatchStdout:
+        def write(self, s: str) -> None:
+            for line in s.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                f = json.loads(line)
+                frames.append(f)
+                t = f.get("type")
+                if t == "turn_end" and not warm_done.is_set():
+                    warm_done.set()
+                elif t == "content" and warm_done.is_set() and not streaming.is_set():
+                    streaming.set()
+
+        def flush(self) -> None:
+            pass
+
+    run(graph, _GatedStdin(), _WatchStdout(), enable_cancel=True)
+
+    types = [f["type"] for f in frames]
+    assert "error" not in types, [f for f in frames if f.get("type") == "error"]
+    # A distinct `cancelled` terminal frame, immediately followed by turn_end.
+    assert "cancelled" in types, types
+    ci = types.index("cancelled")
+    assert frames[ci]["session_id"] == "s"
+    assert types[ci + 1] == "turn_end"
+    # The cancelled (LONG) turn produced no `complete` — cancelled is neither complete
+    # nor error. Its frames sit between the 2nd `ack` and the `cancelled`.
+    second_ack = [i for i, t in enumerate(types) if t == "ack"][1]
+    assert "complete" not in types[second_ack:ci]
+
+    # The session survived: turn 3 ran on the SAME session and remembered turn 1.
+    counts = [f["content"] for f in frames
+              if f["type"] == "content" and str(f.get("content", "")).startswith("count=")]
+    assert counts, frames
+    assert counts[0] == "count=1"                 # warmup saw only its own human message
+    assert int(counts[-1].split("=")[1]) > 1      # turn 3 remembered -> checkpointer survived
 
 
 def test_no_task_destroyed_warning_leaks_to_stderr(tmp_path):

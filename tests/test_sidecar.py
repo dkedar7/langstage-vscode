@@ -1261,3 +1261,143 @@ def test_repl_bare_verb_with_nothing_pending_is_still_an_ordinary_message():
     assert rc == 0
     assert "You said: approve" in out
     assert err == ""
+
+
+# ── gh #65: a valid `decision` with NO pending interrupt must error ──────────
+#
+# gh #33 closed the empty-list half (`decisions: []`) — a decision that is invalid by
+# SHAPE. gh #65 is the non-empty sibling: a well-formed `decisions: [{"type":"approve"}]`
+# arriving on a thread that was never interrupted still has no interrupt to resume, so
+# it must emit the same `error` frame (the invariant the #33 comment already states) —
+# not ack + drive a spurious turn that ends in a false `complete`. The raw run() path
+# now tracks pending-interrupt state per session_id/thread off its own emitted frames.
+
+
+def test_decision_with_no_pending_interrupt_errors_not_spurious_turn():
+    # gh #65: the headline. A valid decision on a fresh, never-interrupted session is
+    # answered with an `error` frame and drives NO turn — no ack, no content, no
+    # (false) `complete`, no turn_end. Contrast the #33 empty-list case, which errors
+    # on shape; this one is well-shaped but has nothing to resume.
+    events = drive(_stub(), [
+        {"type": "decision", "session_id": "fresh", "decisions": [{"type": "approve"}]},
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "no interrupt pending for session 'fresh'" in e["error"]
+               for e in events), [e for e in events if e["type"] == "error"]
+    assert not any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
+    assert not any(e["type"] == "turn_end" for e in events)
+    assert not any(e["type"] == "complete" for e in events)
+    assert not any(e["type"] == "content" for e in events)
+
+
+def test_decision_pending_state_is_keyed_per_session():
+    # gh #65: the fix must be keyed to the RIGHT thread — the sidecar can hold several
+    # sessions. A message that interrupts session A leaves ONLY A pending: the same
+    # decision resumes A but still errors on a never-interrupted session B.
+    events = drive(_interrupt_graph(), [
+        {"type": "message", "session_id": "A", "content": "go"},                       # A interrupts
+        {"type": "decision", "session_id": "B", "decisions": [{"type": "approve"}]},    # B never paused
+        {"type": "decision", "session_id": "A", "decisions": [{"type": "approve"}]},    # A resumes
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "no interrupt pending for session 'B'" in e["error"]
+               for e in events)
+    # A's decision is acted on and the turn resumes with the decision payload intact.
+    assert any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
+    text = "".join(e.get("content", "") for e in events if e["type"] == "content")
+    assert "resumed with" in text and "approve" in text
+
+
+def test_decision_rejected_after_the_interrupt_was_already_answered():
+    # gh #65: pending state clears once the interrupt is resumed and the turn completes,
+    # so a SECOND decision (a double-send, or one after the interrupt already cleared)
+    # has nothing to resume and must error — exactly the "double-send" case the issue
+    # names — rather than drive another spurious turn.
+    events = drive(_interrupt_graph(), [
+        {"type": "message", "session_id": "s", "content": "go"},                       # interrupts
+        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},    # resumes -> completes
+        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},    # nothing pending now
+        {"type": "shutdown"},
+    ])
+    acks = [e for e in events if e.get("type") == "ack" and e.get("ref") == "decision"]
+    assert len(acks) == 1  # only the first decision was acted on
+    assert any(e["type"] == "error" and "no interrupt pending" in e["error"] for e in events)
+
+
+# ── gh #67: cooperative per-turn `cancel` ────────────────────────────────────
+#
+# A `cancel` stops the in-flight turn WITHOUT tearing down the process, so the
+# long-lived session + in-process checkpointer survive (the mid-stream cancel + memory
+# survival is exercised end-to-end in test_agui_sidecar.py, which has the streaming
+# fixtures). Here: the command is known (not "unknown command type"), and a cancel with
+# nothing in flight is refused cleanly rather than crashing or acking.
+
+
+def test_cancel_with_no_turn_in_flight_errors_gracefully():
+    # gh #67: `cancel` is now a known command. With no turn streaming for the session it
+    # gets a clean `error` (like the decision/message guards) — not the old
+    # "unknown command type: 'cancel'", and not a crash or an ack.
+    events = drive(_stub(), [
+        {"type": "cancel", "session_id": "s"},
+        {"type": "shutdown"},
+    ])
+    assert any(e["type"] == "error" and "no turn in progress for session 's'" in e["error"]
+               for e in events), [e for e in events if e["type"] == "error"]
+    assert not any("unknown command" in e.get("error", "") for e in events)
+    assert not any(e["type"] in ("cancelled", "ack", "turn_end") for e in events)
+
+
+def test_run_turn_cooperative_cancel_stops_stream_before_complete():
+    # gh #67: the streaming primitive. With a cancel requested between frames,
+    # _run_turn_agui stops the turn early — emitting NO `complete` — and reports
+    # cancelled. An injected should_cancel makes this deterministic without threads:
+    # it lets the first frame through, then fires.
+    from langstage_vscode.agui_stream import build_session_agent
+    from langstage_vscode.sidecar import _run_turn_agui
+
+    agent = build_session_agent(_stub())
+    emitted: list = []
+    calls = {"n": 0}
+
+    def should_cancel() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 2  # frame 1 passes; cancel before frame 2
+
+    saw_interrupt, cancelled = _run_turn_agui(
+        agent, "hi there", None, {"configurable": {"thread_id": "s"}}, 50_000,
+        emitted.append, should_cancel=should_cancel,
+    )
+    assert cancelled is True
+    assert saw_interrupt is False
+    types = [f.get("type") for f in emitted]
+    assert "complete" not in types  # cancelled before the turn's own `complete`
+    assert calls["n"] >= 2
+
+
+# ── gh #66: the interrupt->decision trace emits `complete` on BOTH turns ──────
+#
+# The runtime emits a `complete` after the `interrupt` turn AND after the resumed
+# `content` turn. The README/CHANGELOG trace had regressed to dropping both. This
+# pins the real sequence so the docs (guarded in test_packaging.py) can be checked
+# against it, and so the behavior itself can't silently change.
+
+
+def test_interrupt_decision_trace_emits_complete_on_both_turns():
+    # gh #66: the full round-trip frame sequence. An interrupt turn is `interrupt` ->
+    # `complete` -> `turn_end` (paused, but still `complete`); the resumed turn is
+    # `content` -> `complete` -> `turn_end`. Both `complete` frames are present.
+    events = drive(_interrupt_graph(), [
+        {"type": "message", "session_id": "s", "content": "do it"},
+        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},
+        {"type": "shutdown"},
+    ])
+    types = [e["type"] for e in events]
+    # Collapse any run of consecutive `content` frames so the assertion is about the
+    # protocol frames, not how finely the reply is chunked.
+    collapsed = [t for i, t in enumerate(types)
+                 if t != "content" or (i == 0 or types[i - 1] != "content")]
+    assert collapsed == [
+        "ready",
+        "ack", "interrupt", "complete", "turn_end",
+        "ack", "content", "complete", "turn_end",
+    ], types
