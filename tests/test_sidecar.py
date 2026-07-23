@@ -1372,3 +1372,32 @@ def test_run_turn_cooperative_cancel_stops_stream_before_complete():
     types = [f.get("type") for f in emitted]
     assert "complete" not in types  # cancelled before the turn's own `complete`
     assert calls["n"] >= 2
+
+
+# ── gh #66: the interrupt->decision trace emits `complete` on BOTH turns ──────
+#
+# The runtime emits a `complete` after the `interrupt` turn AND after the resumed
+# `content` turn. The README/CHANGELOG trace had regressed to dropping both. This
+# pins the real sequence so the docs (guarded in test_packaging.py) can be checked
+# against it, and so the behavior itself can't silently change.
+
+
+def test_interrupt_decision_trace_emits_complete_on_both_turns():
+    # gh #66: the full round-trip frame sequence. An interrupt turn is `interrupt` ->
+    # `complete` -> `turn_end` (paused, but still `complete`); the resumed turn is
+    # `content` -> `complete` -> `turn_end`. Both `complete` frames are present.
+    events = drive(_interrupt_graph(), [
+        {"type": "message", "session_id": "s", "content": "do it"},
+        {"type": "decision", "session_id": "s", "decisions": [{"type": "approve"}]},
+        {"type": "shutdown"},
+    ])
+    types = [e["type"] for e in events]
+    # Collapse any run of consecutive `content` frames so the assertion is about the
+    # protocol frames, not how finely the reply is chunked.
+    collapsed = [t for i, t in enumerate(types)
+                 if t != "content" or (i == 0 or types[i - 1] != "content")]
+    assert collapsed == [
+        "ready",
+        "ack", "interrupt", "complete", "turn_end",
+        "ack", "content", "complete", "turn_end",
+    ], types

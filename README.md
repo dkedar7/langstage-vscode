@@ -192,7 +192,10 @@ resumed with: {'decisions': [{'type': 'approve'}]}
   re-prompted** with the interrupt left pending — it is never silently sent as a new message (which
   would just re-interrupt and look accepted) and never swallowed. `:quit` is always the way out.
 - `--json` composes: the answer line emits `ack` with `"ref": "decision"`, so the trace reads
-  `ready → ack message → interrupt → turn_end → ack decision → content → turn_end`.
+  `ready → ack message → interrupt → complete → turn_end → ack decision → content → complete → turn_end`.
+  (Both turns emit `complete` — an interrupt turn is `interrupt → complete → turn_end`; it is
+  paused, not finished-with-a-reply, so detect the pause via the `interrupt` frame, not the
+  absence of `complete`.)
 - **`--repl` exit codes:** `0` on a clean session (including an interrupt that *was* answered),
   `1` if the agent could not start at all, and **`2`** if the session ends with an interrupt still
   unanswered — the same "paused awaiting a decision" signal `--message` uses.
@@ -238,8 +241,17 @@ python -m langstage_vscode --demo
 ```jsonc
 {"type": "message",  "session_id": "s1", "content": "hello"}
 {"type": "decision", "session_id": "s1", "decisions": [{"type": "approve"}]}
+{"type": "cancel",   "session_id": "s1"}   // abort the in-flight turn, keep the session
 {"type": "shutdown"}
 ```
+
+A **`cancel`** stops the turn currently streaming for that `session_id` **cooperatively** —
+it emits a distinct `cancelled` frame (neither `complete` nor `error`) then `turn_end`, and
+**leaves the process, the session, and its in-process checkpointer alive**, so the next
+`message` on the same `session_id` resumes with memory intact. That is the difference from
+killing the sidecar to stop a turn, which throws the conversation's memory away. A `cancel`
+with no turn in flight for the session is answered with an `error` frame
+(`no turn in progress for session '…'`), consistent with the `decision`/`message` guards.
 
 **Events** (sidecar → client) — the `event_to_dict()` shapes from
 `langstage-core`, plus a few protocol frames:
@@ -251,7 +263,8 @@ python -m langstage_vscode --demo
 {"type": "tool_start", "name": "...", ...} // tool call
 {"type": "tool_end", "name": "...", ...}   // tool result
 {"type": "interrupt", "action_requests": [...]}  // human-in-the-loop
-{"type": "complete"}                       // turn finished (success)
+{"type": "complete"}                       // turn finished (success) — see the note below
+{"type": "cancelled", "session_id": "s1"}  // turn stopped by a `cancel` (not complete/error)
 {"type": "error", "error": "..."}          // protocol error (bad/unknown command)
                                            // OR an exception raised by the agent.
                                            // On agent failure the turn emits this
@@ -260,9 +273,17 @@ python -m langstage_vscode --demo
 ```
 
 > A client must handle `error`: a malformed/unknown command, a `message` with no
-> `content`, an invalid `decision`, **and** an agent crashing mid-turn all emit an
+> `content`, an invalid `decision` (including a well-formed one sent when the session
+> has no pending interrupt to resume), **and** an agent crashing mid-turn all emit an
 > `error` frame. On the agent-failure path there is no `complete` — the sequence
 > is `ack → error → turn_end` — so don't key turn-completion off `complete` alone.
+>
+> Two more terminal shapes are *not* `complete`. An **interrupt** turn emits
+> `interrupt → complete → turn_end`: it *does* still emit `complete`, but the agent
+> produced no reply — it is paused awaiting a decision, so detect the pause via the
+> `interrupt` frame, not by the presence of `complete`. A **cancelled** turn (a client
+> `cancel`) emits `cancelled → turn_end` with **no** `complete` at all — a cancelled turn
+> is neither `complete` nor `error`.
 
 > **`session_id` and conversational memory.** The sidecar maps each
 > `session_id` to a LangGraph `thread_id` in the run config. Multi-turn memory
