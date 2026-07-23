@@ -2,7 +2,7 @@
   "name": "langstage-vscode",
   "displayName": "LangStage",
   "description": "Chat with your LangGraph agent from VS Code, alongside Copilot — the VS Code stage of the LangStage family.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "dkedar7",
   "engines": {
     "vscode": "^1.95.0"

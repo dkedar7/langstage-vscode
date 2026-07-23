@@ -230,11 +230,26 @@ function runTurn(
         let done = false;
         const exitHandler = () => finish(() => reject(new Error('sidecar exited mid-turn')));
         const cancelSub = token.onCancellationRequested(() => {
-          // The stdio protocol has no per-turn cancel command, so stop the turn
-          // by killing the process; the next turn respawns a fresh one (memory
-          // resets on an explicit cancel). End this turn quietly — the user asked.
-          disposeSidecar();
-          finish(resolve);
+          // The sidecar has a cooperative per-turn `cancel` command (gh #67,
+          // shipped in the 0.5.19 sidecar): abort just the in-flight turn while
+          // keeping the process, its session, and its in-process checkpointer
+          // (`MemorySaver`) alive, so conversational memory survives a "stop"
+          // (gh #69). We deliberately do NOT disposeSidecar() here — killing the
+          // process would wipe that memory, the exact harm gh #67 set out to fix.
+          // The turn is not resolved here either: the sidecar answers with
+          // `cancelled` then `turn_end`, and the normal frame loop below ends the
+          // turn on `turn_end` without tearing the process down, so the next turn
+          // reuses the same warm process (same session_id -> same thread_id).
+          try {
+            sc.proc.stdin?.write(
+              JSON.stringify({ type: 'cancel', session_id: 'vscode' }) + '\n',
+            );
+          } catch {
+            // stdin is already gone (the process is dying) — fall back to a clean
+            // teardown so the turn still ends and the next one respawns.
+            disposeSidecar();
+            finish(resolve);
+          }
         });
 
         function finish(settle: () => void): void {
@@ -325,7 +340,10 @@ function dispatch(event: AgentEvent, stream: vscode.ChatResponseStream): void {
     case 'error':
       stream.markdown(`\n\n❌ ${String(event.error ?? 'unknown error')}\n`);
       break;
-    // ready / ack / complete / turn_end / usage: no direct UI output.
+    // ready / ack / complete / cancelled / turn_end / usage: no direct UI
+    // output. `cancelled` (gh #67/#69) is the terminal frame for a cooperatively
+    // stopped turn — it must fall through silently here (not be treated as an
+    // error or unknown frame); the paired `turn_end` ends the turn in runTurn().
     default:
       break;
   }
