@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.3.1] - 2026-07-23
+
+_VS Code extension only (`extension/package.json` 0.3.0 -> 0.3.1). No sidecar / PyPI
+release — the Python `langstage-vscode` package is unchanged at 0.5.19._
+
+### Fixed
+- **"Stop" in the chat now cancels the turn cooperatively instead of killing the sidecar, so
+  conversational memory survives a cancel (gh #69).** This is the extension (client) half of gh #67,
+  whose sidecar half shipped in 0.5.19 above. The extension's `runTurn()`
+  (`extension/src/extension.ts`) still handled `onCancellationRequested` by calling
+  `disposeSidecar()` — killing the long-lived process and wiping its in-process `MemorySaver` — under
+  a comment that became **factually false** once 0.5.19 landed (_"The stdio protocol has no per-turn
+  cancel command…"_). So hitting the chat "stop" button mid-turn silently erased the whole
+  conversation's memory, the exact harm gh #67 set out to fix. Now `onCancellationRequested` writes
+  the cooperative `{"type":"cancel","session_id":"vscode"}` command to the live sidecar over the same
+  stdin JSON-lines writer used for `message`/`decision`, and lets the resulting `cancelled` ->
+  `turn_end` frames end the turn through the normal frame loop **without tearing the process down** —
+  so the session, its `thread_id`, and its checkpointer stay alive and the next turn reuses the same
+  warm process (same `session_id` -> same LangGraph `thread_id`) with memory intact. `disposeSidecar()`
+  is now reserved for genuine teardown (extension deactivate, config change, a new conversation, and a
+  sidecar crash), not a per-turn cancel; if the sidecar's stdin is already gone when a cancel fires,
+  it falls back to a clean teardown so the turn still ends. The now-false comment is replaced with an
+  accurate one, and the `cancelled` frame is documented as an intentionally silent terminal frame in
+  the dispatcher (not mistaken for an error or unknown frame).
+
 ## [0.5.19] - 2026-07-23
 
 ### Added
