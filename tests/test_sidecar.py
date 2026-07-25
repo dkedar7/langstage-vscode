@@ -336,6 +336,102 @@ def test_main_show_config_omits_inert_server_keys(monkeypatch, tmp_path, capsys)
     assert "agent_spec" in out and "workspace_root" in out
 
 
+# ── gh #71: --show-config --json — the machine-readable form ───────────
+
+
+def test_show_config_json_emits_machine_readable_object(monkeypatch, tmp_path, capsys):
+    # gh #71: --show-config --json used to be silently accepted and IGNORED — it printed
+    # the aligned human text with exit 0, so a caller expecting JSON got text and no
+    # error. Now it emits one JSON object (nothing else on stdout, exit 0): the resolved
+    # values + provenance, with a "type" discriminator matching the sibling
+    # --selfcheck --json envelope ({"type": "selfcheck", ...}).
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--show-config", "--json"]) == 0
+    out = capsys.readouterr().out
+    obj = json.loads(out)  # a single, valid JSON object — nothing else on stdout
+    assert isinstance(obj, dict)
+    assert obj["type"] == "show_config"
+    # Provenance for the two keys the sidecar honors.
+    assert set(obj["config"]) == {"agent_spec", "workspace_root"}
+    for entry in obj["config"].values():
+        assert {"value", "source", "env", "legacy_env", "toml"} <= set(entry)
+    # Pure defaults: no toml, values at their defaults.
+    assert obj["config"]["agent_spec"]["value"] is None
+    assert obj["config"]["agent_spec"]["source"] == "default"
+    assert obj["config"]["workspace_root"]["value"] == "."
+    assert obj["toml"] == {"found": False, "path": None}
+
+
+def test_show_config_json_matches_config_dict(monkeypatch, tmp_path, capsys):
+    # "JSON sources match the config": the emitted config/toml are exactly
+    # config_dict() (core's machine-readable twin of describe()), with the SAME omit
+    # list — so the JSON [source] labels are the resolver's own, not a re-derivation
+    # that could drift from the human text. An env-sourced value proves the source
+    # tracks the layer it actually came from (gh #71).
+    from langstage_core.host import HostConfig
+
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_AGENT_SPEC", "env_mod:graph")
+    assert main(["--show-config", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    expected = json.loads(
+        json.dumps(
+            HostConfig.resolve(
+                overrides={"agent_spec": None, "workspace_root": None}
+            ).config_dict(omit_keys=["host", "port", "debug", "title"]),
+            default=str,
+        )
+    )
+    assert obj["config"] == expected["config"]
+    assert obj["toml"] == expected["toml"]
+    # The env-sourced value is reported as coming from the env layer, not default.
+    assert obj["config"]["agent_spec"]["value"] == "env_mod:graph"
+    assert obj["config"]["agent_spec"]["source"].startswith("env")
+
+
+def test_show_config_json_provenance_matches_toml(monkeypatch, tmp_path, capsys):
+    # A langstage.toml [agent].spec shows up in the JSON as its value, a toml-layer
+    # source, and the resolved toml path — the same resolution the human text reports
+    # ("TOML read from: ..."). Provenance the extension can assert on (gh #71).
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text('[agent]\nspec = "mymod:graph"\n')
+    assert main(["--show-config", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    spec = obj["config"]["agent_spec"]
+    assert spec["value"] == "mymod:graph"
+    assert "toml" in spec["source"]  # e.g. "toml (langstage.toml)"
+    assert obj["toml"]["found"] is True
+    assert obj["toml"]["path"] is not None
+    assert obj["toml"]["path"].endswith("langstage.toml")
+
+
+def test_show_config_json_omits_inert_server_keys(monkeypatch, tmp_path, capsys):
+    # The host/port/debug/title omit list applies to the JSON form too, so the text
+    # and JSON agree on which keys show — the inert server/UI keys appear in neither
+    # (gh #14/#71).
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_PORT", "12345")
+    monkeypatch.setenv("LANGSTAGE_HOST", "0.0.0.0")
+    assert main(["--show-config", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert set(obj["config"]) == {"agent_spec", "workspace_root"}
+    for inert in ("host", "port", "debug", "title"):
+        assert inert not in obj["config"]
+
+
+def test_show_config_without_json_stays_human_text(monkeypatch, tmp_path, capsys):
+    # The regression guard for the non-json path: --show-config ALONE stays the aligned
+    # human report, not JSON — unchanged by gh #71 (which only added the --json branch).
+    import pytest as _pytest
+
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("Resolved config")
+    with _pytest.raises(json.JSONDecodeError):
+        json.loads(out)
+
+
 def test_main_no_spec_emits_error(monkeypatch, tmp_path, capsys):
     _isolate_config(monkeypatch, tmp_path)
     assert main([]) == 1

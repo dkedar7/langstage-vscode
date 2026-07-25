@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.5.19"
+version = "0.5.20"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 readme = "README.md"
 license = "MIT"
@@ -19,9 +19,10 @@ dependencies = [
     # AG-UI runtime (ag-ui-langgraph[fastapi] + uvicorn, pulled by core's [agui]
     # extra) is a HARD runtime requirement, not an opt-in. A bare
     # `pip install langstage-vscode` must be able to run a turn.
-    # >=1.0.10 so the sidecar surfaces the standard HumanInterrupt shape instead of
-    # crashing the turn (gh #40; the fix is in core's on_interrupt normalizer).
-    "langstage-core[agui]>=1.0.10",
+    # >=1.0.27 for HostConfig.config_dict() — the machine-readable twin of describe()
+    # that backs `--show-config --json` (gh #71); it also carries the >=1.0.10 fix that
+    # surfaces the standard HumanInterrupt shape instead of crashing the turn (gh #40).
+    "langstage-core[agui]>=1.0.27",
 ]
 
 [project.optional-dependencies]

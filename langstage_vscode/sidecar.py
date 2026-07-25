@@ -1073,7 +1073,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="With --selfcheck, emit a machine-readable JSON verdict; with --message or --repl, "
+        help="With --show-config, emit the resolved config + provenance as one JSON object; "
+        "with --selfcheck, emit a machine-readable JSON verdict; with --message or --repl, "
         "emit the raw event_to_dict frames (one per line) instead of the assembled reply text.",
     )
     from langstage_vscode import __version__
@@ -1103,8 +1104,31 @@ def main(argv: list[str] | None = None) -> int:
         # This is a pure stdio sidecar — it never opens a socket or renders a
         # UI, so the inherited host/port/debug/title keys do nothing here.
         # Hide them so --show-config only advertises what the sidecar honors
-        # (agent_spec, workspace_root). (gh #14)
-        text = cfg.describe(omit_keys=["host", "port", "debug", "title"])
+        # (agent_spec, workspace_root) — in BOTH the text and --json forms, from
+        # the SAME omit list, so the two agree on which keys show. (gh #14)
+        omit_keys = ["host", "port", "debug", "title"]
+        if args.json:
+            # gh #71: --show-config is the sidecar's "why isn't my agent loading?"
+            # verb — it reports the resolved agent_spec/workspace_root, WHICH layer
+            # each came from, and which langstage.toml was read. It was the ONLY
+            # diagnostic verb with no machine-readable form: its siblings all honor
+            # --json (--selfcheck -> {"type": "selfcheck", ...}; --message/--repl ->
+            # raw event frames), but here --json was silently accepted and IGNORED —
+            # it printed the aligned text with exit 0, so a caller expecting JSON got
+            # text and no error. Emit one object that mirrors the human text: the
+            # resolved values + provenance, straight from config_dict() (core's
+            # machine-readable twin of describe(), 1.0.27+), with the SAME omit list
+            # so the JSON and text agree on which keys show and the `source` labels
+            # match. The "type" discriminator follows the sibling --selfcheck --json
+            # envelope ({"type": "selfcheck", ...}) so a client can switch on it. A
+            # WindowsPath (the resolved workspace value, the toml path) is stringified
+            # via default=str; the write goes through the shared cp1252-safe writer
+            # for consistency with every other stdout write (json.dumps is already
+            # ASCII via ensure_ascii, so this can only pass it through).
+            payload = {"type": "show_config", **cfg.config_dict(omit_keys=omit_keys)}
+            _write_safe(sys.stdout, json.dumps(payload, default=str) + "\n")
+            return 0
+        text = cfg.describe(omit_keys=omit_keys)
         # A resolved value with a non-Latin-1 char (a CJK/Cyrillic agent spec or
         # project path) made this raw-text print crash with UnicodeEncodeError on the
         # cp1252 (strict) stdout the extension spawns the sidecar on, emitting nothing.
