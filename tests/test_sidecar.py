@@ -528,6 +528,108 @@ def test_main_demo_end_to_end(monkeypatch, tmp_path, capsys):
     assert "hi demo" in content
 
 
+# ── gh #73: --demo {echo,tools} choice (parity with langstage-agui --demo=tools) ──
+
+
+def test_main_demo_tools_emits_tool_frames(monkeypatch, tmp_path, capsys):
+    """--demo=tools serves the rich-frame demo, so a keyless one-shot on the
+    'use a tool' trigger emits the tool_start/tool_end frames the echo stub never
+    produces — the whole point of the choice (gh #73)."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo=tools", "--message", "please use a tool", "--json"]) == 0
+    frames = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    types = {f.get("type") for f in frames}
+    assert "tool_start" in types
+    assert "tool_end" in types
+    assert "complete" in types
+
+
+def test_main_demo_tools_space_form_also_works(monkeypatch, tmp_path, capsys):
+    """`--demo tools` (space form) resolves the same as `--demo=tools` (nargs='?')."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "tools", "--message", "please use a tool", "--json"]) == 0
+    types = {
+        json.loads(ln).get("type")
+        for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    }
+    assert "tool_start" in types and "tool_end" in types
+
+
+def test_main_demo_tools_emits_reasoning_frames(monkeypatch, tmp_path, capsys):
+    """The 'think' trigger on the tools demo streams `reasoning` frames — another
+    non-content frame type the echo stub can't reach (gh #73)."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo=tools", "--message", "think about it", "--json"]) == 0
+    types = {
+        json.loads(ln).get("type")
+        for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    }
+    assert "reasoning" in types
+
+
+def test_main_demo_tools_interrupt_pauses_with_exit_2(monkeypatch, tmp_path, capsys):
+    """The 'ask me' trigger raises a HITL interrupt: the one-shot emits an `interrupt`
+    frame and exits 2 (paused awaiting a decision), keyless (gh #73)."""
+    _isolate_config(monkeypatch, tmp_path)
+    rc = main(["--demo=tools", "--message", "ask me first", "--json"])
+    assert rc == 2
+    types = {
+        json.loads(ln).get("type")
+        for ln in capsys.readouterr().out.splitlines()
+        if ln.strip()
+    }
+    assert "interrupt" in types
+
+
+def test_main_demo_bare_still_echoes_no_tool_frames(monkeypatch, tmp_path, capsys):
+    """Bare --demo is unchanged: the echo stub, which only ever emits `content`
+    frames and echoes the prompt verbatim — never the rich tool_start/tool_end that
+    --demo=tools adds (backward compatibility, gh #73)."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--message", "please use a tool", "--json"]) == 0
+    frames = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    types = {f.get("type") for f in frames}
+    assert "content" in types
+    assert "tool_start" not in types and "tool_end" not in types
+    text = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
+    assert "please use a tool" in text  # echoed back, not consumed by a tool call
+
+
+def test_main_demo_echo_explicit_matches_bare(monkeypatch, tmp_path, capsys):
+    """--demo=echo explicitly selects the echo stub — identical to bare --demo."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo=echo", "--message", "hello there"]) == 0
+    assert "You said: hello there" in capsys.readouterr().out
+
+
+def test_main_demo_invalid_value_is_argparse_error(monkeypatch, tmp_path, capsys):
+    """--demo=<bad> is an argparse choices error (exit 2), not a silent fallback (gh #73)."""
+    import pytest
+
+    _isolate_config(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(["--demo=bogus"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_main_demo_tools_conflicts_with_agent(monkeypatch, tmp_path, capsys):
+    """The mutual-exclusion guard holds for the tools variant too (gh #73)."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo=tools", "--agent", "x.py:g"]) == 1
+    err = json.loads(capsys.readouterr().out.strip())
+    assert "mutually exclusive" in err["error"]
+
+
+def test_selfcheck_demo_tools_is_healthy(monkeypatch, tmp_path, capsys):
+    """--selfcheck --demo=tools validates the rich demo graph keyless (gh #73)."""
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo=tools", "--selfcheck"]) == 0
+    assert capsys.readouterr().err.startswith("OK:")
+
+
 # ── gh #19: --workspace override must reach the agent (os.environ), not just --show-config ──
 
 

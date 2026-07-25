@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.21] - 2026-07-25
+
+### Added
+- **`--demo` now takes a `{echo,tools}` choice, so a keyless adopter can exercise the extension's
+  *headline* rendering — tool calls, reasoning, and HITL interrupts — in one command, no agent and no
+  API key (gh #73).** The sidecar's `--demo` was a bare `store_true` that only ever served the echo
+  stub, which emits nothing but `content` frames. But the README's **Usage** section promises the
+  extension renders "the agent's **content, tool calls, reasoning, and todo** updates", and the
+  protocol advertises `tool_start` / `tool_end` / `reasoning` / `extraction` / `interrupt` frames —
+  none of which anything keyless could produce. So the one command a brand-new adopter runs to "see
+  it work" (`--demo`) exercised the *least* interesting path, and seeing the frames the extension
+  actually exists to render meant writing a custom agent **and** supplying an API key. Meanwhile the
+  family sibling already solved this: `langstage-agui --demo=tools` serves the rich-frame demo. Now
+  the two keyless surfaces match, flag-for-flag:
+  ```console
+  $ langstage-vscode-sidecar --demo=tools --message "please use a tool" --json \
+      | python -c "import sys,json,collections as c;print(dict(c.Counter(json.loads(l)['type'] for l in sys.stdin if l.strip())))"
+  {'ready': 1, 'ack': 1, 'tool_start': 1, 'tool_end': 1, 'content': 22, 'complete': 1, 'turn_end': 1}
+  $ langstage-vscode-sidecar --demo=tools --message "think about it"  # streams `reasoning` frames
+  $ langstage-vscode-sidecar --demo=tools --message "ask me first"    # HITL `interrupt`, exits 2
+  ```
+  This is **pure CLI wiring** — the rich demo graph (`langstage_core.demo.tools:graph`) already ships
+  in the base `langstage-core[agui]` dependency and already drove these frames through the sidecar via
+  `--agent langstage_core.demo.tools:graph`; this just gives it the keyless front door its sibling
+  already has. `--demo` became `nargs="?", const="echo", choices=["echo","tools"]` over a
+  `DEMO_SPECS = {"echo": "…demo.stub:graph", "tools": "…demo.tools:graph"}` map that mirrors
+  `langstage_core/agui/__main__.py`, so muscle memory transfers across the family and `--demo=<bad>`
+  is a clean argparse choices error. **Bare `--demo` is byte-for-byte unchanged** — it still resolves
+  "echo" (the const), serves the same echo stub, and every existing `--demo` invocation and test
+  behaves identically. The choice composes with the existing verbs for free: `--demo=tools --selfcheck`
+  validates the rich graph keyless, `--demo=tools --repl` answers an interrupt inline, and
+  `--demo=tools --agent …` still errors as mutually exclusive.
+
 ## [0.5.20] - 2026-07-25
 
 ### Added
