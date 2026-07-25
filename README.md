@@ -75,6 +75,10 @@ pip install langstage-vscode
 
 `--demo` (the keyless echo stub) runs on this base install — since 0.5.0 the base
 deps pull the AG-UI runtime, which brings `langgraph`, so no extra is needed.
+Pass **`--demo=tools`** for the rich-frame demo that exercises
+`tool_start`/`tool_end`/`reasoning`/`interrupt` keyless — the extension's headline
+rendering surface, without an agent or API key (parity with `langstage-agui
+--demo=tools`).
 
 ### Extension (from source, until it's on the Marketplace)
 
@@ -124,6 +128,17 @@ instead of the assembled text:
 langstage-vscode-sidecar --demo --message "hello"                       # prints the reply
 langstage-vscode-sidecar --agent ./my.py:graph --message "summarize the repo"
 langstage-vscode-sidecar --agent ./my.py:graph --message "hi" --json    # raw event frames
+```
+
+Bare `--demo` is the echo stub (only `content` frames); **`--demo=tools`** serves the
+rich-frame demo — a keyless way to see every non-content frame the extension renders,
+no agent and no API key. Its trigger phrases route to each frame type:
+
+```bash
+langstage-vscode-sidecar --demo=tools --message "please use a tool" --json  # tool_start/tool_end/extraction
+langstage-vscode-sidecar --demo=tools --message "think about it" --json     # reasoning frames
+langstage-vscode-sidecar --demo=tools --message "ask me first"              # HITL interrupt, exits 2
+langstage-vscode-sidecar --demo=tools --repl                                # answer the interrupt inline
 ```
 
 `--message` answers "what does my agent say *once*?"; **`--repl`** answers "does it
@@ -234,6 +249,9 @@ LANGSTAGE_AGENT_SPEC=./my_agent.py:graph python -m langstage_vscode
 
 # or with no agent and no API key at all — the keyless stub runs on a base install
 python -m langstage_vscode --demo
+
+# or exercise tool-call, reasoning, and interrupt frames keyless (no agent, no API key)
+python -m langstage_vscode --demo=tools
 ```
 
 **Commands** (client → sidecar), one JSON object per line:

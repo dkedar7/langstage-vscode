@@ -344,8 +344,22 @@ def _run_turn_agui(
     return saw_interrupt, False
 
 
-# The keyless echo agent shipped with the shared core — see `--demo`.
-DEMO_AGENT_SPEC = "langstage_core.demo.stub:graph"
+# The keyless built-in demo agents shipped with the shared core, keyed by the
+# value of `--demo` (see main()). Bare `--demo` selects "echo" — the plain token
+# echo stub, unchanged since it was the sole demo through 0.5.20 — while
+# `--demo=tools` selects the rich-frame demo that exercises every non-content
+# frame type: tool_start/tool_end/extraction/reasoning/interrupt (gh #73). This
+# mirrors the langstage-agui sibling's DEMO_SPECS map
+# (langstage_core/agui/__main__.py) so the two keyless surfaces share the same
+# {echo,tools} choices and the muscle memory transfers across the family.
+DEMO_SPECS = {
+    "echo": "langstage_core.demo.stub:graph",
+    "tools": "langstage_core.demo.tools:graph",
+}
+# Backward-compatible alias for the echo stub — the sole `--demo` agent through
+# 0.5.20. Kept so the --selfcheck fallback below (and any external reference)
+# still names the keyless echo spec directly.
+DEMO_AGENT_SPEC = DEMO_SPECS["echo"]
 
 
 def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
@@ -1032,8 +1046,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--demo",
-        action="store_true",
-        help="Run with the built-in keyless demo agent (no API key needed).",
+        nargs="?",
+        const="echo",
+        choices=["echo", "tools"],
+        default=None,
+        help="Run a built-in keyless demo agent (no API key needed). Bare --demo "
+        "serves the echo stub; --demo=tools serves the rich-frame demo that exercises "
+        "tool_start/tool_end/extraction/reasoning/interrupt.",
     )
     parser.add_argument(
         "--show-config",
@@ -1146,7 +1165,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo:
         if args.agent:
             return fail("--demo and --agent are mutually exclusive")
-        spec = DEMO_AGENT_SPEC
+        # args.demo is "echo" (bare --demo, via const) or "tools" — never an
+        # invalid value, which argparse rejects up front via choices=.
+        spec = DEMO_SPECS[args.demo]
 
     # --message is one-shot, --repl is multi-turn interactive; both drive turns but
     # over different input models, so asking for both is a contradiction.
