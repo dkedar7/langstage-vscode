@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.20] - 2026-07-25
+
+### Added
+- **`--show-config --json`: the diagnostic verb the extension most needs to read now has a
+  machine-readable form — and `--json` here no longer silently does nothing (gh #71).**
+  `--show-config` is the sidecar's "why isn't my agent loading?" verb — it reports the **resolved**
+  `agent_spec`/`workspace_root`, *which layer* each value came from (default < `langstage.toml` <
+  env < CLI override), and *which* `langstage.toml` (if any) was read. That is exactly what the VS
+  Code extension needs to surface when a chat turn fails ("agent_spec = `foo.py:graph`, resolved
+  from langstage.toml at `/path`"), and exactly what a CI preflight wants to assert on. But it was
+  the **only** diagnostic verb in the sidecar with no machine-readable form: every sibling already
+  honored `--json` (`--selfcheck --json` -> `{"type": "selfcheck", ...}`; `--message`/`--repl
+  --json` -> raw `event_to_dict` frames), so a programmatic consumer was forced to screen-scrape
+  column-aligned text whose layout is not a stable contract. **Worse, `--show-config --json` was
+  silently accepted and IGNORED** — it printed the plain text with exit 0, so a caller who
+  reasonably expected JSON got text and no error. Now `--show-config --json` emits **one JSON
+  object** — the resolved values with full provenance — and exits 0:
+  ```json
+  {"type": "show_config",
+   "config": {"agent_spec": {"value": null, "source": "default", "env": "LANGSTAGE_AGENT_SPEC", "legacy_env": "DEEPAGENT_AGENT_SPEC", "toml": "agent.spec"},
+              "workspace_root": {"value": ".", "source": "default", "env": "LANGSTAGE_WORKSPACE_ROOT", "legacy_env": "DEEPAGENT_WORKSPACE_ROOT", "toml": "workspace.root"}},
+   "toml": {"found": false, "path": null}}
+  ```
+  The `config`/`toml` payload comes straight from `HostConfig.config_dict(omit_keys=...)` (new in
+  langstage-core 1.0.27 — the machine-readable twin of `describe()`), using the **same**
+  `omit_keys=[host, port, debug, title]` the human text uses (gh #14), so the JSON and the text
+  agree on which keys show and the `source` labels are the resolver's own, not a re-derivation that
+  could drift. The `"type": "show_config"` discriminator follows the sibling `--selfcheck --json`
+  envelope so a client can switch on it. **`--show-config` WITHOUT `--json` is byte-for-byte
+  unchanged** (the aligned human report); the JSON goes through the same cp1252-safe writer as the
+  text form (it is already ASCII via `ensure_ascii`), and a `WindowsPath` workspace/toml value is
+  stringified. Requires **langstage-core >= 1.0.27** (the dependency floor is bumped for
+  `config_dict()`).
+
 ## [Extension 0.3.1] - 2026-07-23
 
 _VS Code extension only (`extension/package.json` 0.3.0 -> 0.3.1). No sidecar / PyPI
