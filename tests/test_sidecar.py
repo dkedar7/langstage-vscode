@@ -128,6 +128,46 @@ def test_message_turn_emits_content_and_terminals():
     assert "hi there" in content
 
 
+# ── gh #75: a finished multi-text-block AIMessage keeps ALL its text blocks ───
+
+
+def _multi_block_graph():
+    """A compiled graph whose single node returns a FINISHED (non-token-streamed)
+    ``AIMessage`` whose ``content`` is a list of two ``text`` blocks — the gh #75 repro.
+
+    Before core 1.0.30 the snapshot walk relied on ag-ui's ``resolve_message_content``,
+    which flattens list content to the FIRST text block, so the second block was
+    silently dropped (wrong-but-plausible output, exit 0). Core 1.0.30 re-reads the
+    original LangChain messages from the checkpoint and emits ``message.text`` (all
+    text blocks joined), so BOTH blocks now reach the wire.
+    """
+    def respond(state):
+        return {"messages": [AIMessage(content=[
+            {"type": "text", "text": "First half of the answer. "},
+            {"type": "text", "text": "Second half of the answer."},
+        ])]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile()
+
+
+def test_finished_multi_block_aimessage_keeps_all_blocks():
+    # gh #75: a keyless user's finished AIMessage with 2+ text blocks must emit EVERY
+    # block, not just the first. Requires langstage-core >=1.0.30 (floor raised in
+    # pyproject.toml); the fix is inherited from core, this guards the sidecar against
+    # a regression on either wire.
+    events = drive(_multi_block_graph(), [
+        {"type": "message", "session_id": "s", "content": "hi"},
+        {"type": "shutdown"},
+    ])
+    content = "".join(e.get("content", "") for e in events if e["type"] == "content")
+    assert "First half of the answer. " in content, content
+    assert "Second half of the answer." in content, content  # dropped before core 1.0.30
+
+
 # ── gh #54: conversational memory across turns in one persistent process ─────
 
 
