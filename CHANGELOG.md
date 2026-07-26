@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.22] - 2026-07-26
+
+### Fixed
+- **A finished, non-token-streamed `AIMessage` with 2+ `text` blocks no longer silently drops every
+  block but the first (gh #75).** When an agent returned a completed `AIMessage` whose `content` was a
+  list of `text` blocks (e.g. `[{"type":"text","text":"First half. "},{"type":"text","text":"Second
+  half."}]`), the sidecar emitted only the **first** block as a `content` frame and dropped the rest —
+  wrong-but-plausible output with a clean exit 0, so nothing flagged the loss. The root cause was in
+  `langstage-core`: ag-ui's `resolve_message_content` flattens list content to the first text block,
+  and core's snapshot walk (the path that renders a finished message that never token-streamed) relied
+  on it. **The fix ships in `langstage-core` 1.0.30**, whose snapshot walk re-reads the original
+  LangChain messages from the graph checkpoint and uses `message.text` (all text blocks joined) on both
+  wires. This release inherits that fix and **raises the `langstage-core` floor to `>=1.0.30`** so a
+  fresh `pip install langstage-vscode` always pulls the corrected core. No sidecar code logic changed;
+  a keyless regression test was added asserting a finished multi-text-block `AIMessage` emits **both**
+  blocks.
+  ```console
+  # before (core 1.0.28): second block dropped
+  $ langstage-vscode-sidecar --agent ./blocks_repro.py:graph --message hi
+  First half of the answer.
+  # after (core 1.0.30): both blocks render
+  $ langstage-vscode-sidecar --agent ./blocks_repro.py:graph --message hi
+  First half of the answer. Second half of the answer.
+  ```
+
 ## [0.5.21] - 2026-07-25
 
 ### Added
