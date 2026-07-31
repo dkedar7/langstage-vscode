@@ -165,6 +165,7 @@ def run(
     spec: str | None = None,
     max_result_len: int = DEFAULT_MAX_RESULT_LEN,
     enable_cancel: bool = False,
+    extractors: Iterable[Any] = (),
     **_legacy: Any,  # accepts + ignores the removed stream_mode/agui kwargs
 ) -> None:
     """Drive the command/event loop over the given streams.
@@ -177,6 +178,12 @@ def run(
     ``cancel`` command can stop an in-flight turn cooperatively — the loop is single-
     threaded and, while pumping a turn's frames, never reads stdin (gh #67). It is off
     for every other caller so their synchronous, lazily-pulled input is untouched.
+
+    ``extractors`` (gh #77) are the ``ToolExtractor``s wired into every turn: core emits
+    an ``extraction`` frame ONLY when one is present. The ``--demo=tools`` path passes
+    ``demo_extractors()`` (the same source the demo graph uses) so the ``extraction``
+    frame the README/``--help``/CHANGELOG advertise is actually produced; every other
+    caller leaves it ``()`` so a real agent's turns are unaffected.
     """
 
     def emit(obj: dict[str, Any]) -> None:
@@ -229,6 +236,15 @@ def run(
         except json.JSONDecodeError as e:
             emit({"type": "error", "error": f"invalid JSON: {e}"})
             continue
+        # gh #80: a syntactically valid JSON scalar/array/null (a bare `"hi"`, `5`,
+        # `[1,2]`, `null`, `true`) parses fine but has no `.get`, so dispatch would
+        # crash the whole loop with an uncaught AttributeError — unwinding out of run()
+        # and main() and tearing down every live session + in-process checkpointer.
+        # Degrade to an `error` frame and continue, exactly like the invalid-JSON and
+        # unknown-command siblings, so a bad line stays a recoverable frame.
+        if not isinstance(cmd, dict):
+            emit({"type": "error", "error": "command must be a JSON object"})
+            continue
 
         ctype = cmd.get("type")
         if ctype == "shutdown":
@@ -279,7 +295,7 @@ def run(
         should_cancel = intake.cancel_check(session_id) if enable_cancel else None
         saw_interrupt, cancelled = _run_turn_agui(
             agui_agent, agui_message, agui_resume, config, max_result_len, emit,
-            should_cancel=should_cancel,
+            should_cancel=should_cancel, extractors=extractors,
         )
         # gh #67: a cancelled turn emits `cancelled` (not `complete`) then `turn_end`,
         # and leaves the session/checkpointer intact — the next turn keeps memory. gh
@@ -304,6 +320,7 @@ def _run_turn_agui(
     emit: Callable[[dict[str, Any]], None],
     *,
     should_cancel: Callable[[], bool] | None = None,
+    extractors: Iterable[Any] = (),
 ) -> tuple[bool, bool]:
     """Stream one turn through the in-process AG-UI adapter, emitting
     ``event_to_dict``-shaped frames (the sidecar's only streaming path, ADR 0003).
@@ -316,6 +333,9 @@ def _run_turn_agui(
     the AG-UI generator is closed — its ``finally: aclose()`` cancels the pending
     ag-ui run task and tears the turn down WITHOUT touching the session/checkpointer,
     so the next turn on this thread still has memory — and the turn returns cancelled.
+
+    ``extractors`` (gh #77) are forwarded to the AG-UI stream so an ``extraction`` frame
+    is emitted when one is wired (the ``--demo=tools`` path); ``()`` otherwise.
     """
     from .agui_stream import stream_events_sync
 
@@ -327,6 +347,7 @@ def _run_turn_agui(
         thread_id,
         resume=resume,
         max_result_len=max_result_len,
+        extractors=extractors,
     )
     try:
         for frame in stream:
@@ -376,7 +397,9 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
 
     from langstage_vscode import __version__
 
-    # Hand the agent the resolved workspace, same as the real run path.
+    # Publish the resolved workspace to the agent's env (canonical + legacy names).
+    # The cwd half of "same as the real run path" — os.chdir(workspace_root()) — is done
+    # below, AFTER the spec resolves, exactly like run() (gh #79).
     apply_workspace(cfg.workspace_root)
 
     def verdict(ok: bool, msg: str) -> int:
@@ -406,6 +429,16 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     runnable_error = _runnable_graph_error(graph, spec)
     if runnable_error is not None:
         return verdict(False, runnable_error)
+
+    # gh #79: enter the workspace as cwd before driving the preflight turn, exactly like
+    # the real run path (run()/--message/--repl os.chdir(workspace_root()) after
+    # resolving the spec, ADR 0006 / gh #30). Without this the selfcheck turn ran from
+    # the LAUNCH cwd, so a cwd-sensitive agent's raw relative file I/O landed somewhere
+    # the runtime never touches — a preflight that exercises a different working
+    # directory than the runtime can pass while the runtime behaves differently (the
+    # "selfcheck != runtime -> false green" class fixed for the agui path in #28). Done
+    # AFTER load_agent_spec so a relative spec still resolves against the launch cwd.
+    os.chdir(workspace_root())
 
     # 3. Drive one real turn through the actual command loop and assert the
     # documented terminal sequence (ready -> ack -> content... -> complete ->
@@ -818,6 +851,7 @@ def _run_repl(
     session_id: str = "repl",
     prompt: str = "> ",
     show_prompt: bool | None = None,
+    extractors: Iterable[Any] = (),
 ) -> int:
     """Interactive multi-turn REPL: the conversational companion to one-shot
     ``--message`` (gh #56).
@@ -968,7 +1002,7 @@ def _run_repl(
                 {"type": "message", "session_id": session_id, "content": text}
             )
 
-    run(graph, commands(), sink, spec=spec)
+    run(graph, commands(), sink, spec=spec, extractors=extractors)
 
     # A pre-loop failure (e.g. a non-runnable spec) emits an error before any turn
     # ran, so no turn_end was seen — treat that as a hard start failure (exit 1),
@@ -988,7 +1022,10 @@ def _run_repl(
     return 0
 
 
-def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> int:
+def _run_once(
+    graph: Any, message: str, *, spec: str | None, as_json: bool,
+    extractors: Iterable[Any] = (),
+) -> int:
     """Drive exactly ONE turn with ``message`` and stream the result, then exit — no
     ``shutdown`` handshake required from the caller (gh #48).
 
@@ -1015,7 +1052,7 @@ def _run_once(graph: Any, message: str, *, spec: str | None, as_json: bool) -> i
         json.dumps({"type": "shutdown"}),
     ]
     sink = _OneShotSink(sys.stdout, sys.stderr, as_json=as_json)
-    run(graph, iter(commands), sink, spec=spec)
+    run(graph, iter(commands), sink, spec=spec, extractors=extractors)
     sink.close_reply()  # human mode: close the streamed reply with a trailing newline
 
     if sink.saw_error:
@@ -1169,6 +1206,18 @@ def main(argv: list[str] | None = None) -> int:
         # invalid value, which argparse rejects up front via choices=.
         spec = DEMO_SPECS[args.demo]
 
+    # gh #77: the rich-frame demo advertises an `extraction` frame (README/--help/
+    # CHANGELOG), which core emits ONLY when a `ToolExtractor` is wired into the turn.
+    # Wire the demo's own paired extractors — the same `demo_extractors()` the demo
+    # graph uses — on the `--demo=tools` path, so the documented frame is actually
+    # produced instead of being unreachable through the sidecar. Every other path keeps
+    # `()`, so a real adopter's agent turns are unchanged.
+    extractors: Iterable[Any] = ()
+    if args.demo == "tools":
+        from langstage_core.demo.tools import demo_extractors
+
+        extractors = demo_extractors()
+
     # --message is one-shot, --repl is multi-turn interactive; both drive turns but
     # over different input models, so asking for both is a contradiction.
     if args.repl and args.message is not None:
@@ -1193,7 +1242,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001
-        return fail(f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}")
+        msg = f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}"
+        # gh #78: --message/--repl are the human/CLI front doors, which honor the
+        # text-vs-`--json` contract and keep stdout the clean reply channel. In TEXT
+        # mode a load failure must surface as `error: <msg>` on STDERR — identical in
+        # shape to their runtime-error path (`_OneShotSink`) — not the raw-protocol
+        # JSON frame on stdout (what `--json` is the switch for). `--json` keeps the
+        # JSON error frame, and the raw stdio loop the extension drives keeps its
+        # stdout frame via fail() (that NDJSON frame is exactly what that consumer wants).
+        if (args.message is not None or args.repl) and not args.json:
+            _write_safe(sys.stderr, f"error: {msg}\n")
+            sys.stderr.flush()
+            return 1
+        return fail(msg)
 
     # Operate the agent from the workspace as cwd (ADR 0006), AFTER resolving the
     # spec (a relative -a ./x.py:graph must resolve against the invocation cwd, cf.
@@ -1204,19 +1265,19 @@ def main(argv: list[str] | None = None) -> int:
     # One-shot: drive a single turn and print the reply, then exit — no interactive
     # command loop, no caller-crafted NDJSON + shutdown line (gh #48).
     if args.message is not None:
-        return _run_once(graph, args.message, spec=spec, as_json=args.json)
+        return _run_once(graph, args.message, spec=spec, as_json=args.json, extractors=extractors)
 
     # Interactive multi-turn: read a prompt per line and drive turns over ONE
     # long-lived session so a checkpointer-backed agent remembers prior turns —
     # the conversational companion to --message (gh #56).
     if args.repl:
-        return _run_repl(graph, spec=spec, as_json=args.json)
+        return _run_repl(graph, spec=spec, as_json=args.json, extractors=extractors)
 
     # The raw stdio command loop (what the VS Code extension drives). enable_cancel
     # spins up the background reader so a `cancel` command can stop an in-flight turn
     # cooperatively — keeping the long-lived session and its in-process checkpointer —
     # instead of the extension having to kill the whole sidecar (gh #67).
-    run(graph, sys.stdin, sys.stdout, spec=spec, enable_cancel=True)
+    run(graph, sys.stdin, sys.stdout, spec=spec, enable_cancel=True, extractors=extractors)
     return 0
 
 

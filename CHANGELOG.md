@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.23] - 2026-07-31
+
+### Fixed
+- **`--demo=tools` now actually emits the advertised `extraction` frame (gh #77).** The README,
+  `--help`, and the 0.5.21 CHANGELOG all promise the rich-frame demo exercises an `extraction` frame,
+  but the sidecar drove `iter_event_frames(...)` with the default `extractors=()`, so `extraction` was
+  **unreachable** — only `tool_start` / `tool_end` / `reasoning` / `interrupt` ever appeared, one short
+  of the five advertised. `extraction` is emitted only when a `ToolExtractor` is wired into the turn;
+  for the demo graph that is `langstage_core.demo.tools.demo_extractors()` (the same source the demo
+  graph itself uses). The fix threads an `extractors` argument through `run()` → `_run_turn_agui` →
+  `stream_events_sync` → `agui_events` → `iter_event_frames`, and the `--demo=tools` path now passes
+  `demo_extractors()`. Every other path (a real adopter's `--agent`) keeps `()`, so their turns are
+  unchanged. The verbatim documented command now shows the frame:
+  ```console
+  $ langstage-vscode-sidecar --demo=tools --message "please use a tool" --json \
+      | python -c "import sys,json,collections as c;print(dict(c.Counter(json.loads(l)['type'] for l in sys.stdin if l.strip())))"
+  {'ready': 1, 'ack': 1, 'tool_start': 1, 'tool_end': 1, 'extraction': 1, 'content': 22, 'complete': 1, 'turn_end': 1}
+  ```
+- **`--message` / `--repl` text mode no longer leaks a raw JSON `error` frame to stdout on agent-load
+  failure (gh #78).** These are the human/CLI front doors: text mode keeps stdout the clean reply
+  channel and puts diagnostics on stderr, and `--json` is the switch for raw frames. Both contracts were
+  honored when an agent loaded and then errored at *runtime*, but a *load* failure (typo'd path, import
+  error) went through the raw-protocol `fail()` helper and printed `{"type":"error",...}` to **stdout**
+  in every mode — so `reply=$(langstage-vscode-sidecar --agent ./typo.py:graph --message hi)` captured a
+  JSON error blob as if it were the reply. A load failure in text mode now writes `error: <msg>` to
+  **stderr** (identical in shape to the runtime-error path) with stdout empty; `--json` still emits the
+  JSON error frame; and the raw stdio loop the extension drives is unchanged (still the stdout NDJSON
+  frame that consumer wants).
+- **`--selfcheck` drives its preflight turn from the workspace, not the launch cwd (gh #79).** Every
+  runtime path (`run()` / `--message` / `--repl`) does `os.chdir(workspace_root())` after resolving the
+  spec (ADR 0006 / gh #30), so a bring-your-own agent's raw relative file I/O lands in the workspace.
+  `--selfcheck` called `apply_workspace(...)` (which only *publishes* the workspace to env) but skipped
+  the `os.chdir`, so it drove its one validation turn from the launch cwd — a cwd-sensitive agent was
+  preflighted in the wrong directory, and a green selfcheck gave false confidence about where the
+  runtime's file behavior actually lands (the "selfcheck ≠ runtime → false green" class already fixed
+  for the agui path in gh #28). `_selfcheck` now `os.chdir(workspace_root())` after resolving the spec,
+  before driving the turn, making its in-code "same as the real run path" comment true.
+- **A valid-JSON but non-object command line no longer crashes the whole command loop (gh #80).** A
+  line that is syntactically valid JSON yet not an object — a bare string, number, array, `null`, or
+  boolean — parsed past the `json.loads` guard and then hit `cmd.get("type")` on a non-dict, raising an
+  uncaught `AttributeError` that unwound out of `run()` → `main()` and killed the process (exit 1),
+  tearing down every session and its in-process checkpointer. This was strictly worse than every sibling
+  malformed-input case (invalid JSON, unknown command type, empty content, empty `decisions`), all of
+  which emit an `error` frame and continue. The loop now validates that the parsed command is a JSON
+  object before dispatch and emits `{"type":"error","error":"command must be a JSON object"}` and
+  `continue`s, keeping the process, its sessions, and their checkpointers alive.
+
 ## [0.5.22] - 2026-07-26
 
 ### Fixed

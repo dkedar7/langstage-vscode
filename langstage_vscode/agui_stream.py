@@ -48,12 +48,16 @@ async def agui_events(
     *,
     resume: Any = None,
     max_result_len: int = 50_000,
+    extractors: Any = (),
 ) -> AsyncIterator[Dict[str, Any]]:
     """Drive ``agent.run()`` in-process and yield ``event_to_dict``-shaped frames.
 
     content  <- TextMessageContentEvent
     tool_start <- ToolCall{Start,Args,End}
     tool_end   <- ToolCallResultEvent
+    extraction <- a wired ``ToolExtractor``'s output (only when ``extractors`` is
+                  non-empty — e.g. the ``--demo=tools`` path passes ``demo_extractors()``,
+                  gh #77; ``()`` for a plain agent means no ``extraction`` frame)
     interrupt  <- CustomEvent(on_interrupt)
     error      <- RunErrorEvent ; complete at the end.
 
@@ -65,12 +69,13 @@ async def agui_events(
     from langstage_core.agui import iter_event_frames
 
     async for frame in iter_event_frames(
-        agent, message, thread_id, resume=resume, max_result_len=max_result_len
+        agent, message, thread_id, resume=resume, max_result_len=max_result_len,
+        extractors=extractors,
     ):
         yield frame
 
 
-def stream_events_sync(agent, message, thread_id, *, resume=None, max_result_len=50_000):
+def stream_events_sync(agent, message, thread_id, *, resume=None, max_result_len=50_000, extractors=()):
     """Sync bridge: pump the async generator. The sidecar's run() loop is a plain
     sync process (no running event loop), so a fresh loop is safe and streaming
     stays lazy (one frame at a time)."""
@@ -78,7 +83,8 @@ def stream_events_sync(agent, message, thread_id, *, resume=None, max_result_len
 
     loop = asyncio.new_event_loop()
     agen = agui_events(
-        agent, message, thread_id, resume=resume, max_result_len=max_result_len
+        agent, message, thread_id, resume=resume, max_result_len=max_result_len,
+        extractors=extractors,
     )
     try:
         while True:

@@ -1639,3 +1639,187 @@ def test_interrupt_decision_trace_emits_complete_on_both_turns():
         "ack", "interrupt", "complete", "turn_end",
         "ack", "content", "complete", "turn_end",
     ], types
+
+
+# ── gh #77: --demo=tools wires the demo extractors so `extraction` is emitted ──
+#
+# Three doc surfaces (README/--help/CHANGELOG) promise --demo=tools exercises an
+# `extraction` frame, but the sidecar drove iter_event_frames with the default
+# extractors=(), so `extraction` was UNREACHABLE — only tool_start/tool_end/reasoning/
+# interrupt ever appeared. The fix wires the demo's own paired extractors
+# (demo_extractors(), the same source the demo graph uses) on the --demo=tools path.
+
+
+def test_main_demo_tools_emits_extraction_frame(tmp_path):
+    # gh #77: the verbatim README/--help command must now emit the advertised
+    # `extraction` frame, alongside the tool_start/tool_end it already produced. Driven
+    # as a SUBPROCESS (fresh interpreter -> clean demo-graph checkpointer) so it runs the
+    # exact CLI the docs hand a new adopter, immune to the shared in-process "once" thread
+    # the other --demo=tools --message tests leave state on. Mirrors the issue's repro.
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["LANGSTAGE_CONFIG_HOME"] = str(tmp_path)  # no stray real config
+    proc = subprocess.run(
+        [sys.executable, "-m", "langstage_vscode",
+         "--demo=tools", "--message", "please use a tool", "--json"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    types = {json.loads(ln).get("type") for ln in proc.stdout.splitlines() if ln.strip()}
+    assert "extraction" in types, proc.stdout  # the frame that was unreachable before the fix
+    assert "tool_start" in types and "tool_end" in types  # not regressed
+
+
+def test_run_extractors_gate_the_extraction_frame():
+    # gh #77: the mechanism. The SAME demo tools graph emits `extraction` ONLY when the
+    # extractors are wired into run(); with the default extractors=() it does not — so
+    # the wiring, not the graph, is what was missing (mirrors the issue's core-API proof).
+    from langstage_core.demo.tools import demo_extractors
+
+    graph = load_agent_spec("langstage_core.demo.tools:graph")
+    cmds = [
+        {"type": "message", "session_id": "s", "content": "please use a tool"},
+        {"type": "shutdown"},
+    ]
+
+    def types_for(extractors):
+        stdin = io.StringIO("".join(json.dumps(c) + "\n" for c in cmds))
+        stdout = io.StringIO()
+        run(graph, stdin, stdout, extractors=extractors)
+        return {json.loads(ln)["type"] for ln in stdout.getvalue().splitlines() if ln.strip()}
+
+    assert "extraction" not in types_for(())            # what the sidecar used to do
+    assert "extraction" in types_for(demo_extractors())  # the one-line fix
+
+
+# ── gh #78: text-mode load failure -> `error: <msg>` on stderr, clean stdout ──
+#
+# --message/--repl are the human/CLI front doors: text mode keeps stdout the clean
+# reply channel and puts diagnostics on stderr, and --json is the switch for raw
+# frames. A load failure used to ignore both — it printed the raw JSON error frame to
+# STDOUT in every mode (via the raw-protocol fail() helper), poisoning a captured
+# `reply=$(... --message ...)` with a JSON blob the moment you typo an agent path.
+
+
+def test_main_message_load_failure_text_mode_errors_on_stderr(monkeypatch, tmp_path, capsys):
+    # gh #78: text mode -> `error: <msg>` on stderr (same shape as the runtime-error
+    # path), stdout stays empty — no raw JSON frame leak.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_AGENT_SPEC", "no_such_module:graph")
+    assert main(["--message", "hello"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""  # clean reply channel — no JSON error blob on stdout
+    assert captured.err.startswith("error: ")
+    assert "failed to load agent" in captured.err
+    assert '"type"' not in captured.out  # not the machine JSON frame
+
+
+def test_main_message_load_failure_json_mode_keeps_frame_on_stdout(monkeypatch, tmp_path, capsys):
+    # gh #78: with --json a load failure still emits the JSON error frame on stdout —
+    # that is exactly what --json is for; only TEXT mode routes to stderr.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_AGENT_SPEC", "no_such_module:graph")
+    assert main(["--message", "hello", "--json"]) == 1
+    captured = capsys.readouterr()
+    frame = json.loads(captured.out.strip())
+    assert frame["type"] == "error" and "failed to load agent" in frame["error"]
+    assert captured.err == ""  # --json keeps everything on the one channel
+
+
+def test_main_repl_load_failure_text_mode_errors_on_stderr(monkeypatch, tmp_path, capsys):
+    # gh #78: --repl shares the same load step and the same text-mode contract.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_AGENT_SPEC", "no_such_module:graph")
+    monkeypatch.setattr("sys.stdin", io.StringIO("hi\n:quit\n"))
+    assert main(["--repl"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert "failed to load agent" in captured.err
+
+
+def test_main_raw_protocol_load_failure_keeps_json_frame_on_stdout(monkeypatch, tmp_path, capsys):
+    # gh #78 regression guard: the raw stdio loop the VS Code extension drives is
+    # UNCHANGED — a load failure is the `{"type":"error"}` NDJSON frame on stdout (what
+    # that consumer wants), not routed to stderr.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_AGENT_SPEC", "no_such_module:graph")
+    assert main([]) == 1
+    frame = json.loads(capsys.readouterr().out.strip())
+    assert frame["type"] == "error" and "failed to load agent" in frame["error"]
+
+
+# ── gh #79: --selfcheck drives its preflight turn from the workspace cwd ──
+#
+# Every runtime path (run()/--message/--repl) os.chdir(workspace_root()) after
+# resolving the spec (ADR 0006), so a BYO agent's raw relative file I/O lands in the
+# workspace. --selfcheck skipped that chdir and drove its turn from the LAUNCH cwd, so
+# a cwd-sensitive agent was preflighted in the wrong directory -> a green selfcheck
+# gave false confidence about where the runtime's file behavior actually lands (#28).
+
+
+def test_selfcheck_drives_turn_from_workspace_cwd(monkeypatch, tmp_path, capsys):
+    # gh #79: the issue's cwd_probe. An agent whose turn does a raw RELATIVE write must,
+    # during selfcheck, write into the WORKSPACE (like the real run path) — not the
+    # launch cwd. Spec resolved AFTER an absolute path so the chdir can't change where it
+    # loads from.
+    import os
+    from pathlib import Path
+
+    _isolate_config(monkeypatch, tmp_path)  # chdir's to tmp_path (the launch cwd)
+    agent = tmp_path / "cwd_probe.py"
+    agent.write_text(
+        "import os\n"
+        "from langgraph.graph import StateGraph, START, END, MessagesState\n"
+        "from langchain_core.messages import AIMessage\n"
+        "def r(state):\n"
+        "    open('agent_wrote_here.txt', 'w').write(os.getcwd())\n"
+        "    return {'messages': [AIMessage(content=os.getcwd())]}\n"
+        "b = StateGraph(MessagesState)\n"
+        "b.add_node('r', r)\n"
+        "b.add_edge(START, 'r'); b.add_edge('r', END)\n"
+        "graph = b.compile()\n"
+    )
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    rc = main(["--selfcheck", "--agent", f"{agent}:graph", "--workspace", str(ws)])
+    assert rc == 0, capsys.readouterr().err
+    # The relative write landed in the WORKSPACE, not the launch cwd.
+    assert (ws / "agent_wrote_here.txt").exists(), "selfcheck turn did not run in the workspace"
+    assert not (tmp_path / "agent_wrote_here.txt").exists(), "selfcheck polluted the launch cwd"
+    # ...and the cwd the turn actually saw resolves to the workspace.
+    assert Path((ws / "agent_wrote_here.txt").read_text()).resolve() == ws.resolve()
+
+
+# ── gh #80: a valid-JSON non-object line errors gracefully (no crash) ──
+#
+# A line that is valid JSON but not an object (a bare string/number/array/null/bool)
+# parsed fine past the json.loads guard, then hit cmd.get("type") on a non-dict and
+# raised an uncaught AttributeError that unwound out of run()/main() and killed the
+# whole process — tearing down every session + in-process checkpointer. Every sibling
+# malformed input (bad JSON, unknown type, empty content) emits an `error` and continues.
+
+
+def test_non_object_json_line_errors_and_loop_survives():
+    # gh #80: every non-object JSON scalar/array/null must emit an `error` frame and keep
+    # the loop alive — a valid message AFTER the bad line is still processed to completion,
+    # not lost to a process crash.
+    for bad in ('"oops"', "42", "[1, 2, 3]", "null", "true"):
+        stdin = io.StringIO(
+            bad + "\n"
+            + json.dumps({"type": "message", "session_id": "s", "content": "survives"}) + "\n"
+            + json.dumps({"type": "shutdown"}) + "\n"
+        )
+        stdout = io.StringIO()
+        run(_stub(), stdin, stdout)  # must NOT raise (was an uncaught AttributeError)
+        events = [json.loads(ln) for ln in stdout.getvalue().splitlines() if ln.strip()]
+        types = [e["type"] for e in events]
+        assert any(e["type"] == "error" and "must be a JSON object" in e["error"]
+                   for e in events), bad
+        # loop survived: the message after the bad line ran to completion
+        assert "complete" in types and "turn_end" in types, (bad, types)
+        content = "".join(e.get("content", "") for e in events if e["type"] == "content")
+        assert "survives" in content, bad
