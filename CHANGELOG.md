@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.24] - 2026-08-03
+
+Requires **langstage-core >=1.0.32** (up from >=1.0.30) — two of the changes below surface
+mechanisms core added in 1.0.32.
+
+### Added
+- **`--show-config` now surfaces unknown / misspelled `langstage.toml` keys (gh #82).** `--show-config`
+  is the sidecar's "why isn't my agent loading?" verb, but a one-character typo in the config path the
+  README steers users to (`specc` for `spec`, a stray `modell`, a whole misspelled `[agents]` section)
+  was **silently dropped** — the single most common real-world misconfiguration, and the only case in an
+  otherwise thoroughly-instrumented config chain with no diagnostic. It read identically to "no config at
+  all." core 1.0.32 collects those ignored keys (`HostConfig.unknown_toml_keys()`) and both `describe()`
+  and `config_dict()` now report them, so the sidecar's `--show-config` — which renders through both —
+  surfaces them with no local wiring, purely on the `>=1.0.32` floor bump: the human text gains an
+  `unknown TOML keys (ignored - a typo or wrong table?): agent.modell` line, and `--show-config --json`
+  reports them under `toml.unknown_keys`. A clean, fully-recognized toml reports none.
+- **`--traceback` / `--debug` flag (also honored via `LANGSTAGE_DEBUG=1`) shows WHERE your agent crashed
+  (gh #83).** Every agent-error path surfaced only `Type: message` and discarded the traceback, so on a
+  *real* failing agent you couldn't tell which line threw — you'd abandon the preflight verbs and re-run
+  under a bare `python -c` to get a stack. core 1.0.32 carries the failing turn's Python traceback in the
+  terminal `error` frame when `LANGSTAGE_DEBUG` is set; `--traceback` sets that env for the turn and the
+  error sinks render the frame's `traceback` — to **stderr** in text mode (stdout stays the clean reply
+  channel, per gh #78) and in the raw / `--json` error frame as-is. `--selfcheck --json` gains a matching
+  `traceback` field (and prints it under the FAIL line in text mode) so CI can log it. Default off →
+  today's terse output is byte-identical; `LANGSTAGE_DEBUG=1` alone works for the extension / CI path
+  where argv can't be extended.
+  ```console
+  $ langstage-vscode-sidecar --agent ./deep_crash.py:graph --message "hi" --traceback
+  error: KeyError: 'missing_key'
+  Traceback (most recent call last):
+    ...
+    File ".../deep_crash.py", line 5, in respond
+      return helper({})
+    File ".../deep_crash.py", line 3, in helper
+      return x["missing_key"]
+  KeyError: 'missing_key'
+  ```
+
+### Fixed
+- **`--message` / `--repl` text mode no longer leaks a raw JSON `error` frame to stdout on "no agent spec"
+  or mutually-exclusive-flag misuse (gh #84, finishes gh #78).** gh #78 routed the agent-*load*-failure
+  `fail()` to stderr in text mode, but two sibling `fail()` sites the same front doors reach **first** were
+  missed: a `--message`/`--repl` invocation with no agent configured (the most common first-run mistake)
+  and `--repl --message` / `--demo --agent` misuse still printed `{"type":"error",...}` to **stdout**, so a
+  captured `reply=$(langstage-vscode-sidecar --message hi)` got a JSON blob as if it were the reply. The
+  text-vs-`--json` routing now lives in the shared `fail()` helper, so **every** front-door failure writes
+  `error: <msg>` to **stderr** with stdout empty; `--json` still emits the JSON frame; and the raw stdio
+  loop the extension drives (no `--message`/`--repl`) is unchanged — still the stdout NDJSON `error` frame
+  that consumer wants.
+- **README memory note corrected: a checkpointer-less graph *does* remember within one process (gh #85).**
+  The README claimed in three places that a graph compiled **without** a checkpointer is stateless across
+  turns and that `--repl` catches "the missing-checkpointer mistake." That is backwards in the shipped
+  runtime: core's `build_agent` auto-attaches an `InMemorySaver` to any graph that lacks one (the AG-UI
+  adapter needs threaded state, and it avoids a hard "No checkpointer set" crash), so within **one** sidecar
+  process (the extension's per-conversation process since gh #54, and `--repl`) a checkpointer-less graph
+  carries memory across turns keyed by `session_id`/`thread_id`. The note now says so: compiling your own
+  checkpointer chooses *which* one is used, not *whether* one turn remembers the next in-process; the real
+  distinction is **in-process vs. cross-process** — the auto-attached (in-memory) saver is lost when the
+  process ends, and durable cross-process memory still needs a **persistent** checkpointer (`SqliteSaver`,
+  `PostgresSaver`, …). A regression test pins the checkpointer-less-remembers-in-one-process behavior.
+
 ## [0.5.23] - 2026-07-31
 
 ### Fixed

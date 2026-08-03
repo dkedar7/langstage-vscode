@@ -309,7 +309,11 @@ def _isolate_config(monkeypatch, tmp_path):
     legacy + canonical env so main() resolves from pure defaults."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LANGSTAGE_CONFIG_HOME", str(tmp_path))
-    for var in ("LANGSTAGE_AGENT_SPEC", "DEEPAGENT_AGENT_SPEC", "LANGSTAGE_WORKSPACE_ROOT", "DEEPAGENT_WORKSPACE_ROOT"):
+    # LANGSTAGE_DEBUG is in the strip list so the default (no-debug) tests start clean AND
+    # so monkeypatch restores it at teardown even though main() sets os.environ directly on
+    # --traceback (gh #83) — keeping a --traceback test from leaking debug into later tests.
+    for var in ("LANGSTAGE_AGENT_SPEC", "DEEPAGENT_AGENT_SPEC", "LANGSTAGE_WORKSPACE_ROOT",
+                "DEEPAGENT_WORKSPACE_ROOT", "LANGSTAGE_DEBUG"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -399,7 +403,8 @@ def test_show_config_json_emits_machine_readable_object(monkeypatch, tmp_path, c
     assert obj["config"]["agent_spec"]["value"] is None
     assert obj["config"]["agent_spec"]["source"] == "default"
     assert obj["config"]["workspace_root"]["value"] == "."
-    assert obj["toml"] == {"found": False, "path": None}
+    # core >=1.0.32 adds `unknown_keys` to the toml block (gh #82); no toml here -> empty.
+    assert obj["toml"] == {"found": False, "path": None, "unknown_keys": []}
 
 
 def test_show_config_json_matches_config_dict(monkeypatch, tmp_path, capsys):
@@ -1072,12 +1077,15 @@ def test_main_repl_demo_end_to_end(monkeypatch, tmp_path, capsys):
 
 def test_main_repl_conflicts_with_message(monkeypatch, tmp_path, capsys):
     # --repl (multi-turn) and --message (one-shot) drive turns over different input
-    # models; asking for both is a contradiction and errors before any turn.
+    # models; asking for both is a contradiction and errors before any turn. gh #84: this
+    # mutex is a front-door fail() site, so in text mode it routes to STDERR (`error: ...`),
+    # not a JSON frame on stdout (the mutex-in-detail assertions live in the gh #84 block).
     _isolate_config(monkeypatch, tmp_path)
     assert main(["--demo", "--repl", "--message", "hi"]) == 1
-    err = json.loads(capsys.readouterr().out.strip())
-    assert err["type"] == "error"
-    assert "mutually exclusive" in err["error"]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert "mutually exclusive" in captured.err
 
 
 # ── gh #58: interrupt-aware turn drivers ─────────────────────────────
@@ -1823,3 +1831,280 @@ def test_non_object_json_line_errors_and_loop_survives():
         assert "complete" in types and "turn_end" in types, (bad, types)
         content = "".join(e.get("content", "") for e in events if e["type"] == "content")
         assert "survives" in content, bad
+
+
+# ── gh #82: --show-config surfaces unknown/misspelled langstage.toml keys ──
+#
+# --show-config is the sidecar's "why isn't my agent loading?" verb, but a typo'd key
+# in langstage.toml (specc, modell, a wrong [agents] section) was silently dropped —
+# the single most common config mistake, invisible on the one verb built to catch it.
+# core 1.0.32 collects those unknown keys (HostConfig.unknown_toml_keys()) and both
+# describe() and config_dict() now surface them, so the sidecar's --show-config (which
+# renders through both) reports them with no local wiring — just the >=1.0.32 floor.
+
+
+def test_show_config_text_surfaces_unknown_toml_key(monkeypatch, tmp_path, capsys):
+    # gh #82: a valid [agent].spec plus a typo'd sibling key `modell` — the human report
+    # must name the ignored key so a one-character typo isn't invisible.
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text(
+        '[agent]\nspec = "my_agent.py:graph"\nmodell = "gpt-4o"\n'
+    )
+    assert main(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    assert "unknown TOML keys" in out
+    assert "agent.modell" in out
+
+
+def test_show_config_json_surfaces_unknown_toml_key(monkeypatch, tmp_path, capsys):
+    # gh #82: the machine-readable form reports the same under toml.unknown_keys, so the
+    # extension / CI can flag a typo'd config without scraping the human text.
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text(
+        '[agent]\nspec = "my_agent.py:graph"\nmodell = "gpt-4o"\n'
+    )
+    assert main(["--show-config", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["toml"]["unknown_keys"] == ["agent.modell"]
+
+
+def test_show_config_clean_toml_has_no_unknown_keys(monkeypatch, tmp_path, capsys):
+    # gh #82: a clean, fully-recognized toml reports NO unknown keys — the notice fires
+    # only on a genuine typo/misplacement, not on every file.
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text('[agent]\nspec = "my_agent.py:graph"\n')
+    assert main(["--show-config", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["toml"]["unknown_keys"] == []
+    assert main(["--show-config"]) == 0  # and the human text omits the notice line
+    assert "unknown TOML keys" not in capsys.readouterr().out
+
+
+def test_show_config_surfaces_misspelled_section(monkeypatch, tmp_path, capsys):
+    # gh #82: a whole misspelled section `[agents]` (not `[agent]`) is dropped just as
+    # silently — its key must show up as an unknown dotted key too.
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text('[agents]\nspec = "my_agent.py:graph"\n')
+    assert main(["--show-config", "--json"]) == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["toml"]["unknown_keys"] == ["agents.spec"]
+
+
+# ── gh #83: --traceback / LANGSTAGE_DEBUG shows WHERE the agent crashed ──
+#
+# Every agent-error path surfaced only `Type: message`, never the traceback, so on a
+# real failing agent you couldn't tell which line threw. core 1.0.32 carries the failing
+# turn's traceback in the terminal `error` frame when LANGSTAGE_DEBUG is set; --traceback
+# (alias --debug) sets that env for the turn and the sinks render the frame's `traceback`
+# — stderr in text mode (stdout stays the clean reply channel), the raw frame in --json.
+
+
+def _deep_crash_agent(tmp_path):
+    """Write an agent whose node crashes deep in a helper (a KeyError two frames down),
+    so a rendered traceback must name the helper line, not just the exception type."""
+    agent = tmp_path / "deep_crash.py"
+    agent.write_text(
+        "from langgraph.graph import StateGraph, MessagesState, START, END\n"
+        "def helper(x):\n"
+        "    return x['missing_key']\n"
+        "def respond(state):\n"
+        "    return helper({})\n"
+        "g = StateGraph(MessagesState)\n"
+        "g.add_node('respond', respond)\n"
+        "g.add_edge(START, 'respond')\n"
+        "g.add_edge('respond', END)\n"
+        "graph = g.compile()\n"
+    )
+    return f"{agent}:graph"
+
+
+def test_message_traceback_flag_shows_crash_location_on_stderr(monkeypatch, tmp_path, capsys):
+    # gh #83: WITH --traceback, an erroring agent still prints `error: <type>: <msg>` and,
+    # additionally, the full Python traceback to STDERR — naming the helper line that threw
+    # — while stdout stays empty (the clean reply channel).
+    _isolate_config(monkeypatch, tmp_path)
+    spec = _deep_crash_agent(tmp_path)
+    assert main(["--agent", spec, "--message", "hi", "--traceback"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""  # stdout stays the clean reply channel
+    assert "error: KeyError" in captured.err
+    assert "Traceback (most recent call last)" in captured.err
+    assert "in helper" in captured.err  # names WHERE it crashed, not just the type
+
+
+def test_message_without_traceback_flag_shows_only_the_message(monkeypatch, tmp_path, capsys):
+    # gh #83: the default (no flag, no env) is 100% unchanged — the terse `error:` line on
+    # stderr and NO traceback, so normal output is byte-identical to before.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+    spec = _deep_crash_agent(tmp_path)
+    assert main(["--agent", spec, "--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: KeyError" in captured.err
+    assert "Traceback (most recent call last)" not in captured.err
+    assert "in helper" not in captured.err
+
+
+def test_message_debug_alias_matches_traceback(monkeypatch, tmp_path, capsys):
+    # gh #83: --debug is an alias for --traceback (the muscle-memory spelling) and behaves
+    # identically.
+    _isolate_config(monkeypatch, tmp_path)
+    spec = _deep_crash_agent(tmp_path)
+    assert main(["--agent", spec, "--message", "hi", "--debug"]) == 1
+    assert "Traceback (most recent call last)" in capsys.readouterr().err
+
+
+def test_message_env_var_enables_traceback_without_flag(monkeypatch, tmp_path, capsys):
+    # gh #83: LANGSTAGE_DEBUG=1 is honored on its own (the env path for the extension / CI
+    # where argv can't be extended) — no --traceback flag needed.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LANGSTAGE_DEBUG", "1")
+    spec = _deep_crash_agent(tmp_path)
+    assert main(["--agent", spec, "--message", "hi"]) == 1
+    assert "Traceback (most recent call last)" in capsys.readouterr().err
+
+
+def test_message_json_mode_carries_traceback_in_error_frame(monkeypatch, tmp_path, capsys):
+    # gh #83: in --json mode the traceback rides the error frame on stdout (that is the raw
+    # channel), and stderr stays clean — one channel.
+    _isolate_config(monkeypatch, tmp_path)
+    spec = _deep_crash_agent(tmp_path)
+    assert main(["--agent", spec, "--message", "hi", "--traceback", "--json"]) == 1
+    captured = capsys.readouterr()
+    frames = [json.loads(ln) for ln in captured.out.splitlines() if ln.strip()]
+    err = next(f for f in frames if f.get("type") == "error")
+    assert "in helper" in err["traceback"]
+    assert captured.err == ""  # --json keeps everything on the one NDJSON channel
+
+
+def test_oneshot_sink_renders_frame_traceback_only_when_present():
+    # gh #83 unit: the text-mode sink renders a frame's `traceback` to stderr AFTER the
+    # `error:` line, and adds nothing when the field is absent (default byte-identical).
+    from langstage_vscode.sidecar import _OneShotSink
+
+    out, err = io.StringIO(), io.StringIO()
+    sink = _OneShotSink(out, err, as_json=False)
+    sink.write(json.dumps({"type": "error", "error": "KeyError: 'x'",
+                           "traceback": "Traceback (most recent call last):\n  ...\nKeyError"}) + "\n")
+    assert out.getvalue() == ""
+    assert err.getvalue().startswith("error: KeyError: 'x'\n")
+    assert "Traceback (most recent call last)" in err.getvalue()
+
+    out2, err2 = io.StringIO(), io.StringIO()
+    sink2 = _OneShotSink(out2, err2, as_json=False)
+    sink2.write(json.dumps({"type": "error", "error": "KeyError: 'x'"}) + "\n")
+    assert err2.getvalue() == "error: KeyError: 'x'\n"  # no traceback, nothing extra
+
+
+# ── gh #84: no-spec + mutex fail() paths honor the #78 front-door contract ──
+#
+# gh #78 routed the agent-LOAD-failure fail() to stderr in text mode but missed the two
+# sibling fail() sites the same --message/--repl front doors reach FIRST: "no agent spec"
+# and mutually-exclusive-flag misuse still leaked `{"type":"error",...}` to STDOUT, so a
+# captured `reply=$(... --message ...)` got a JSON blob instead of a clean stdout + stderr
+# diagnostic. All fail() sites now share the routing.
+
+
+def test_message_no_spec_errors_on_stderr_not_stdout(monkeypatch, tmp_path, capsys):
+    # gh #84: --message with no agent configured (the most common first-run mistake) ->
+    # `error: no agent spec ...` on STDERR, stdout empty — not a JSON frame on stdout.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""  # clean reply channel — no JSON error blob
+    assert captured.err.startswith("error: ")
+    assert "no agent spec" in captured.err
+    assert '"type"' not in captured.out
+
+
+def test_repl_no_spec_errors_on_stderr_not_stdout(monkeypatch, tmp_path, capsys):
+    # gh #84: --repl shares the same no-spec front-door contract.
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setattr("sys.stdin", io.StringIO("hi\n:quit\n"))
+    assert main(["--repl"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert "no agent spec" in captured.err
+
+
+def test_message_mutex_misuse_errors_on_stderr_not_stdout(monkeypatch, tmp_path, capsys):
+    # gh #84: --repl --message (mutually exclusive) reaches a fail() site BEFORE the load
+    # path; in text mode it must route to stderr too, not leak JSON to stdout.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--demo", "--repl", "--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""  # stdout clean
+    assert captured.err.startswith("error: ")
+    assert "mutually exclusive" in captured.err
+
+
+def test_message_no_spec_json_keeps_frame_on_stdout(monkeypatch, tmp_path, capsys):
+    # gh #84: --json is still the switch for the raw frame — a no-spec failure under --json
+    # keeps the JSON error frame on stdout, stderr clean (parity with the #78 load path).
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--message", "hi", "--json"]) == 1
+    captured = capsys.readouterr()
+    frame = json.loads(captured.out.strip())
+    assert frame["type"] == "error" and "no agent spec" in frame["error"]
+    assert captured.err == ""
+
+
+def test_raw_protocol_no_spec_keeps_json_frame_on_stdout(monkeypatch, tmp_path, capsys):
+    # gh #84 regression guard: the raw stdio loop the extension drives (no --message/--repl)
+    # is UNCHANGED — no-spec is still the stdout NDJSON `error` frame that consumer wants.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main([]) == 1
+    frame = json.loads(capsys.readouterr().out.strip())
+    assert frame["type"] == "error" and "no agent spec" in frame["error"]
+
+
+# ── gh #85: a checkpointer-LESS graph remembers within one process ──
+#
+# The README used to claim a graph compiled without a checkpointer is stateless across
+# turns. It isn't: core's build_agent auto-attaches an InMemorySaver to any graph that
+# lacks one, so within ONE sidecar process a checkpointer-less graph carries memory
+# across turns keyed by session_id/thread_id. This pins that runtime behavior so the
+# corrected README note can't silently drift back.
+
+
+def _nockpt_memory_graph():
+    """A graph compiled with NO checkpointer whose node counts human messages seen on the
+    thread — a rising count proves the sidecar's auto-attached checkpointer carried state."""
+    def respond(state):
+        n = len([m for m in state["messages"] if m.__class__.__name__ == "HumanMessage"])
+        return {"messages": [AIMessage(content=f"seen {n}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile()  # NO checkpointer — the sidecar attaches an in-memory one
+
+
+def test_checkpointerless_graph_remembers_within_one_process():
+    # gh #85: same session_id, one run() process — turn 2 remembers turn 1 even though the
+    # graph was compiled without a checkpointer (contradicting the old README claim).
+    events = drive(_nockpt_memory_graph(), [
+        {"type": "message", "session_id": "vscode", "content": "first"},
+        {"type": "message", "session_id": "vscode", "content": "second"},
+        {"type": "shutdown"},
+    ])
+    turns = _turns(events)
+    assert len(turns) == 2, [e["type"] for e in events]
+    assert _reply(turns[0]) == "seen 1"  # turn 1 sees only its own human message
+    assert _reply(turns[1]) == "seen 2"  # turn 2 REMEMBERS turn 1 — no user checkpointer
+
+
+def test_checkpointerless_graph_isolates_distinct_sessions():
+    # gh #85: the auto-attached checkpointer is a genuine per-thread saver, not a global
+    # buffer — a DIFFERENT session_id in the same process starts fresh at "seen 1".
+    events = drive(_nockpt_memory_graph(), [
+        {"type": "message", "session_id": "a", "content": "first"},
+        {"type": "message", "session_id": "b", "content": "first"},
+        {"type": "shutdown"},
+    ])
+    turns = _turns(events)
+    assert _reply(turns[0]) == "seen 1"
+    assert _reply(turns[1]) == "seen 1"  # session b is isolated from session a
