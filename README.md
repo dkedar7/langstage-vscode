@@ -145,9 +145,9 @@ langstage-vscode-sidecar --demo=tools --repl                                # an
 *remember*?" — the multi-turn companion to `--message`. It reads one prompt per line and
 drives a turn, but keeps **one long-lived session** (a single `session_id`, so a single
 LangGraph `thread_id`) alive for every turn — the same per-conversation shape the VS Code
-extension uses — so a **checkpointer-backed** agent's memory persists across turns. That
-makes the checkpointer caveat below verifiable from the CLI in ten seconds: tell it your
-name, ask on the next line. Exit with **Ctrl-D** (EOF) or a `:quit` line; `--json` streams
+extension uses — so your agent's memory persists across turns. That makes the memory
+behavior below verifiable from the CLI in ten seconds: tell it your name, ask on the next
+line. Exit with **Ctrl-D** (EOF) or a `:quit` line; `--json` streams
 the raw event frames instead of the assembled text, just like `--message`:
 
 ```bash
@@ -159,10 +159,13 @@ langstage-vscode-sidecar --agent ./my.py:graph --repl
 > :quit
 ```
 
-An agent compiled with a checkpointer (`graph.compile(checkpointer=MemorySaver())`) will
-recall the first line on the second; one without a checkpointer won't — which is exactly the
-missing-checkpointer / wrong-`session_id` mistake to catch before wiring up the extension
-(see the memory note under [Sidecar protocol](#sidecar-protocol)).
+Your agent will recall the first line on the second **even if you never compiled in a
+checkpointer** — within one sidecar process the sidecar auto-attaches an in-memory checkpointer
+to any graph that lacks one, so `--repl` (one process, one `session_id`) verifies in-process
+memory and catches a wrong-`session_id` mistake before wiring up the extension. What it can't
+prove is *durable* memory: that in-memory state is lost when the process ends, so persistence
+across separate processes still needs a persistent checkpointer (see the memory note under
+[Sidecar protocol](#sidecar-protocol)).
 
 Both turn-drivers are **interrupt-aware**. If your agent pauses on a human-in-the-loop
 `interrupt(...)` (the common `deepagents` / LangGraph approval pattern), the turn is no longer
@@ -304,28 +307,33 @@ with no turn in flight for the session is answered with an `error` frame
 > is neither `complete` nor `error`.
 
 > **`session_id` and conversational memory.** The sidecar maps each
-> `session_id` to a LangGraph `thread_id` in the run config. Multi-turn memory
-> across messages with the same `session_id` therefore only works if your agent
-> was **compiled with a checkpointer** (e.g. `graph.compile(checkpointer=...)`,
-> or `create_deep_agent(..., checkpointer=...)`). A plain `create_react_agent`
-> graph with no checkpointer is stateless: the second turn won't remember the
-> first, even with a matching `session_id`. This is expected LangGraph
-> behavior, not a sidecar bug.
+> `session_id` to a LangGraph `thread_id` in the run config, and attaches an
+> **in-memory checkpointer** to any graph that was compiled without one — the
+> AG-UI adapter the sidecar streams through needs threaded state, and this avoids
+> a hard "No checkpointer set" crash. So within **one sidecar process**, multi-turn
+> memory across messages with the same `session_id` works for **any** graph — even
+> a plain `create_react_agent` with no checkpointer of its own — because the sidecar
+> supplies the missing checkpointer for you, keyed by `session_id` / `thread_id`.
+> Compiling your own (`graph.compile(checkpointer=...)`, or
+> `create_deep_agent(..., checkpointer=...)`) chooses *which* checkpointer is used,
+> not *whether* one turn remembers the next in-process.
 >
-> The **VS Code extension keeps one sidecar process alive per conversation** —
-> it spawns the sidecar on the first `@langstage` message and reuses that same
-> process (and the same `session_id`) for every following turn — so an
-> **in-process** checkpointer like `MemorySaver` persists across turns in chat,
-> not just when you drive the stdio protocol by hand (gh #54). The process is
-> restarted on a config change (interpreter / agent spec) and when you start a
-> new chat, so a new conversation begins with a clean thread. If you drive the
-> sidecar yourself, keep **one process** alive and send each turn to it — a fresh
-> process per message gets a fresh in-process checkpointer and forgets the prior
-> turn; a **persistent** checkpointer (`SqliteSaver`, `PostgresSaver`, …) keyed
-> by `thread_id` is what survives across separate processes. The **`--repl`** flag
-> (see [Configure](#configure)) does exactly this — one process, one session across
-> turns — so you can verify this memory behavior from the CLI without hand-crafting
-> the protocol.
+> The real distinction is **in-process vs. cross-process**. The auto-attached
+> checkpointer — like any `MemorySaver` — lives only in that process, so its memory
+> is lost when the process ends. The **VS Code extension keeps one sidecar process
+> alive per conversation** — it spawns the sidecar on the first `@langstage` message
+> and reuses that same process (and the same `session_id`) for every following turn
+> (gh #54) — so that in-process memory persists across turns in chat, not just when
+> you drive the stdio protocol by hand. The process is restarted on a config change
+> (interpreter / agent spec) and when you start a new chat, so a new conversation
+> begins with a clean thread. If you drive the sidecar yourself, keep **one process**
+> alive and send each turn to it — a fresh process per message gets a fresh in-memory
+> checkpointer and forgets the prior turn. What survives **across separate processes**
+> (durable memory) is a **persistent** checkpointer (`SqliteSaver`, `PostgresSaver`,
+> …) keyed by `thread_id` — the one thing the sidecar's in-memory default is *not*.
+> The **`--repl`** flag (see [Configure](#configure)) drives exactly one process with
+> one session across turns, so you can verify this in-process memory behavior from the
+> CLI without hand-crafting the protocol.
 
 ## Development
 

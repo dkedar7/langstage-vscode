@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.5.23"
+version = "0.5.24"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 readme = "README.md"
 license = "MIT"
@@ -26,7 +26,11 @@ dependencies = [
     # Also carries >=1.0.27's HostConfig.config_dict() — the machine-readable twin of
     # describe() that backs `--show-config --json` (gh #71) — and the >=1.0.10 fix that
     # surfaces the standard HumanInterrupt shape instead of crashing the turn (gh #40).
-    "langstage-core[agui]>=1.0.30",
+    # >=1.0.32 for the two mechanisms this release surfaces: HostConfig.unknown_toml_keys()
+    # (a typo'd langstage.toml key now shows in `--show-config` / config_dict().toml.unknown_keys,
+    # gh #82) and the terminal `error` frame's `traceback` field under LANGSTAGE_DEBUG, which
+    # `--traceback` renders so a crash shows WHERE, not just its type + message (gh #83).
+    "langstage-core[agui]>=1.0.32",
 ]
 
 [project.optional-dependencies]

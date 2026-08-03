@@ -402,17 +402,21 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     # below, AFTER the spec resolves, exactly like run() (gh #79).
     apply_workspace(cfg.workspace_root)
 
-    def verdict(ok: bool, msg: str) -> int:
+    def verdict(ok: bool, msg: str, traceback: str | None = None) -> int:
+        # gh #83: when --traceback / LANGSTAGE_DEBUG is on and the preflight turn errored,
+        # core carries the crash's Python traceback in the error frame; thread it into the
+        # verdict so a FAIL says WHERE, not just what — a "traceback" field in --json (CI can
+        # log it) and printed under the FAIL line in text mode. Absent otherwise.
         if as_json:
-            sys.stdout.write(
-                json.dumps(
-                    {"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}
-                )
-                + "\n"
-            )
+            payload = {"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}
+            if traceback:
+                payload["traceback"] = traceback
+            sys.stdout.write(json.dumps(payload) + "\n")
             sys.stdout.flush()
         else:
             sys.stderr.write(("OK: " if ok else "FAIL: ") + msg + "\n")
+            if traceback:
+                sys.stderr.write(traceback if traceback.endswith("\n") else traceback + "\n")
         return 0 if ok else 1
 
     # 1. The spec must import.
@@ -455,8 +459,13 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     types = [f.get("type") for f in frames]
 
     if "error" in types:
-        err = next(f.get("error") for f in frames if f.get("type") == "error")
-        return verdict(False, f"agent spec {spec!r} errored driving a turn: {err}")
+        err_frame = next(f for f in frames if f.get("type") == "error")
+        err = err_frame.get("error")
+        return verdict(
+            False,
+            f"agent spec {spec!r} errored driving a turn: {err}",
+            traceback=err_frame.get("traceback"),
+        )
     if "complete" not in types or "turn_end" not in types:
         return verdict(
             False, f"agent spec {spec!r} did not complete a turn (frames: {types})"
@@ -660,6 +669,16 @@ class _OneShotSink:
         elif ftype == "error":
             # stdout stays the clean reply channel; surface the failure on stderr.
             _write_safe(self._err, f"error: {frame.get('error', '')}\n")
+            # gh #83: under --traceback / LANGSTAGE_DEBUG, core carries the failing turn's
+            # Python traceback in the `error` frame — render it to STDERR (never stdout, so
+            # a captured reply stays clean) so a developer sees WHERE the agent crashed, not
+            # just the type + message. The key is absent unless debug is on, so default
+            # output is byte-identical. --json forwards the frame verbatim above, so the
+            # traceback already rides that stream; this is the text-mode surfacing.
+            tb = frame.get("traceback")
+            if tb:
+                _write_safe(self._err, tb if tb.endswith("\n") else tb + "\n")
+            self._err.flush()
         elif ftype == "interrupt":
             # gh #58: never render an interrupt turn as blank. Surface a concise
             # notice on stderr (stdout stays the clean reply channel, exactly like the
@@ -1133,6 +1152,17 @@ def main(argv: list[str] | None = None) -> int:
         "with --selfcheck, emit a machine-readable JSON verdict; with --message or --repl, "
         "emit the raw event_to_dict frames (one per line) instead of the assembled reply text.",
     )
+    parser.add_argument(
+        "--traceback",
+        "--debug",
+        action="store_true",
+        dest="traceback",
+        help="On an agent error, also show the full Python traceback so you can see WHERE your "
+        "agent crashed (not just the exception type + message). Printed to stderr in text mode "
+        "(stdout stays the clean reply channel) and carried in the error frame in --json mode. "
+        "Also enabled via LANGSTAGE_DEBUG=1 (the env path for the extension / CI, where you "
+        "can't add argv). Off by default - today's terse behavior is 100%% unchanged.",
+    )
     from langstage_vscode import __version__
 
     parser.add_argument(
@@ -1149,6 +1179,16 @@ def main(argv: list[str] | None = None) -> int:
     # ignore it (hidden from --help; the env-var half was already tolerated).
     parser.add_argument("--agui", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    # gh #83: --traceback / --debug opts into the crash-location view. langstage-core
+    # (>=1.0.32) includes the failing turn's Python traceback in the terminal `error`
+    # frame ONLY when LANGSTAGE_DEBUG is set, so translate the flag into that env for the
+    # turn — the error sinks then render the frame's `traceback` (stderr in text mode; in
+    # the raw / --json frame as-is). LANGSTAGE_DEBUG=1 on its own is already honored (core
+    # reads it directly), which is the env path for the extension / CI where argv can't be
+    # extended. Default off -> the error frame is byte-identical to today's.
+    if args.traceback:
+        os.environ["LANGSTAGE_DEBUG"] = "1"
 
     # Same resolution chain as every other deep-agent surface:
     # defaults < langstage.toml < LANGSTAGE_* env < CLI flags.
@@ -1194,6 +1234,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     def fail(msg: str) -> int:
+        # gh #78 / #84: --message and --repl are the human/CLI front doors — in TEXT mode
+        # they keep stdout the clean reply channel and route diagnostics to STDERR as
+        # `error: <msg>`, and --json is the switch for raw frames. gh #78 gave the
+        # load-failure path that treatment; folding it into fail() extends it to the sibling
+        # `fail()` sites the same front doors reach FIRST — "no agent spec" and
+        # mutually-exclusive-flag misuse — which used to leak `{"type":"error",...}` to
+        # stdout, poisoning a captured `reply=$(... --message ...)` (gh #84). The raw stdio
+        # protocol loop the extension drives (no --message/--repl) still gets the stdout
+        # NDJSON `error` frame — exactly what that consumer wants — and so does --json.
+        if (args.message is not None or args.repl) and not args.json:
+            _write_safe(sys.stderr, f"error: {msg}\n")
+            sys.stderr.flush()
+            return 1
         sys.stdout.write(json.dumps({"type": "error", "error": msg}) + "\n")
         sys.stdout.flush()
         return 1
@@ -1243,17 +1296,11 @@ def main(argv: list[str] | None = None) -> int:
         graph = load_agent_spec(spec)
     except Exception as exc:  # noqa: BLE001
         msg = f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}"
-        # gh #78: --message/--repl are the human/CLI front doors, which honor the
-        # text-vs-`--json` contract and keep stdout the clean reply channel. In TEXT
-        # mode a load failure must surface as `error: <msg>` on STDERR — identical in
-        # shape to their runtime-error path (`_OneShotSink`) — not the raw-protocol
-        # JSON frame on stdout (what `--json` is the switch for). `--json` keeps the
-        # JSON error frame, and the raw stdio loop the extension drives keeps its
-        # stdout frame via fail() (that NDJSON frame is exactly what that consumer wants).
-        if (args.message is not None or args.repl) and not args.json:
-            _write_safe(sys.stderr, f"error: {msg}\n")
-            sys.stderr.flush()
-            return 1
+        # gh #78: a load failure honors the same front-door contract as every other
+        # `fail()` site — `error: <msg>` on STDERR in text mode (identical in shape to the
+        # runtime-error path, `_OneShotSink`), the JSON frame under --json, and the stdout
+        # NDJSON frame on the raw stdio loop. That routing now lives in fail() itself (gh
+        # #84), so this path is just a fail() call like the others.
         return fail(msg)
 
     # Operate the agent from the workspace as cwd (ADR 0006), AFTER resolving the
