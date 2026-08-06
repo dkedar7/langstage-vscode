@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.25] - 2026-08-06
+
+### Fixed
+- **`--workspace` now enters the workspace *before* the agent module is imported, so a preflight no
+  longer false-FAILs an agent that does import-time relative I/O (gh #88).** The sidecar `chdir`ed into
+  the workspace only **after** `load_agent_spec()` had already imported the agent module, so an agent that
+  does module-level (import-time) relative file I/O — loading a prompt/config/`.env`/data file at import —
+  was imported from the **launch cwd**, not the workspace. In the real extension run path this is invisible
+  (the extension spawns the sidecar with `cwd: workspace`, so import-time cwd already *is* the workspace),
+  but the documented preflight (`--selfcheck` / `--message` with `--workspace`, launched from an arbitrary
+  shell dir) imported the agent at that shell's cwd and gave a **false FAIL**
+  (`FileNotFoundError: 'prompt.txt'`) for an agent that runs fine in `@langstage` chat. This is the residual
+  of the same "enter the workspace before doing work" class fixed for the *turn* in gh #79, applied one step
+  earlier — before import. `os.chdir(workspace_root())` now runs **before** `load_agent_spec()` on both the
+  run path and `--selfcheck`; a relative `-a ./x.py:graph` spec is absolutized against the launch cwd first
+  (so it still loads from where you pointed, cf. cli gh #30), then imported from inside the workspace —
+  faithful to the extension's spawn. Regression tests pin that the agent module is imported (and reads a
+  workspace-relative file) with cwd == the workspace on both the `--message` and `--selfcheck` paths.
+- **`debug = true` in `langstage.toml` is now honored, not silently ignored (gh #90, finishes gh #83).**
+  Since 0.5.24 (gh #83) the crash-location traceback had three documented, interchangeable opt-ins meant to
+  be layers of one setting on the family config chain (`defaults < langstage.toml < LANGSTAGE_* env < CLI
+  flags`): the `--traceback`/`--debug` flag, `LANGSTAGE_DEBUG=1` in the env, and `debug = true` in
+  `langstage.toml`. `HostConfig.resolve()` **did** resolve `cfg.debug` from the TOML key, but the sidecar
+  only ever enabled the traceback via `args.traceback` or the env var core reads directly — it never
+  consulted the resolved `cfg.debug`, so the **TOML layer was dead** while its env/flag siblings worked. A
+  project that pins `debug = true` to keep crash tracebacks on (exactly as it pins `[agent] spec`) got terse
+  errors with no hint why. The debug gate now reads `if args.traceback or cfg.debug:` (moved **after**
+  `resolve()` so the resolved value is available), so all three sources set `LANGSTAGE_DEBUG` for the turn
+  and the error sinks render the traceback identically — `debug = true` in the toml alone now produces the
+  full Python traceback, same as `LANGSTAGE_DEBUG=1` / `--traceback`. A regression test pins the TOML-only
+  path (no env, no flag).
+
 ## [0.5.24] - 2026-08-03
 
 Requires **langstage-core >=1.0.32** (up from >=1.0.30) — two of the changes below surface

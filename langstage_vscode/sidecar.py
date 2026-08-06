@@ -383,6 +383,34 @@ DEMO_SPECS = {
 DEMO_AGENT_SPEC = DEMO_SPECS["echo"]
 
 
+def _absolutize_spec_path(spec: str) -> str:
+    """Make a file-path agent spec absolute against the CURRENT (launch) cwd so a
+    later ``os.chdir(workspace)`` can't change which file it loads.
+
+    gh #88: the sidecar must import the agent module with cwd == the workspace — the
+    same cwd the extension spawns it under (``cwd: workspace``) — so an agent that does
+    module-level (import-time) relative I/O (loading a prompt/config/data file) is
+    imported faithfully rather than from the launch cwd. That means the
+    ``os.chdir(workspace_root())`` has to happen BEFORE ``load_agent_spec()``. But a
+    relative ``-a ./x.py:graph`` must still resolve against the launch cwd (cli
+    semantics, cf. gh #30), so its file path is absolutized HERE, before the chdir —
+    keeping both: the module is found where the user pointed, and it is imported from
+    inside the workspace.
+
+    Mirrors core's loader split (``langstage_core/host/loader.py``): only a *file-path*
+    spec — whose module part ends in ``.py`` or contains a path separator — is
+    absolutized; a dotted ``package.module:obj`` spec (and a malformed one core will
+    reject) passes through untouched.
+    """
+    module_path, sep, obj_name = spec.rpartition(":")
+    if not sep or not module_path or not obj_name:
+        return spec  # no ':obj' suffix — leave it for core to reject
+    is_file_path = module_path.endswith(".py") or any(s in module_path for s in ("/", "\\"))
+    if not is_file_path:
+        return spec  # dotted module path — cwd-independent, leave it alone
+    return f"{os.path.abspath(module_path)}:{obj_name}"
+
+
 def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     """Preflight the spawned interpreter + agent spec, then exit 0/non-zero.
 
@@ -419,9 +447,21 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
                 sys.stderr.write(traceback if traceback.endswith("\n") else traceback + "\n")
         return 0 if ok else 1
 
+    # gh #79 + gh #88: enter the workspace as cwd BEFORE importing the agent — and before
+    # driving the preflight turn — so the whole preflight is faithful to the real run path,
+    # where the extension spawns the sidecar with cwd == workspace. gh #79 moved the TURN
+    # into the workspace; gh #88 moves the IMPORT there too — the residual — so an agent
+    # that does module-level (import-time) relative I/O (loading a prompt/config/data file)
+    # loads the same way it will at runtime, instead of false-FAILing from the LAUNCH cwd.
+    # The spec's file path is absolutized against the launch cwd FIRST so a relative
+    # -a ./x.py:graph still loads from where the user pointed (cli gh #30), not from inside
+    # the workspace. ("selfcheck != runtime -> false result" class, cf. the agui path #28.)
+    resolved_spec = _absolutize_spec_path(spec)
+    os.chdir(workspace_root())
+
     # 1. The spec must import.
     try:
-        graph = load_agent_spec(spec)
+        graph = load_agent_spec(resolved_spec)
     except Exception as exc:  # noqa: BLE001 — reported as the verdict
         return verdict(
             False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}"
@@ -433,16 +473,6 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     runnable_error = _runnable_graph_error(graph, spec)
     if runnable_error is not None:
         return verdict(False, runnable_error)
-
-    # gh #79: enter the workspace as cwd before driving the preflight turn, exactly like
-    # the real run path (run()/--message/--repl os.chdir(workspace_root()) after
-    # resolving the spec, ADR 0006 / gh #30). Without this the selfcheck turn ran from
-    # the LAUNCH cwd, so a cwd-sensitive agent's raw relative file I/O landed somewhere
-    # the runtime never touches — a preflight that exercises a different working
-    # directory than the runtime can pass while the runtime behaves differently (the
-    # "selfcheck != runtime -> false green" class fixed for the agui path in #28). Done
-    # AFTER load_agent_spec so a relative spec still resolves against the launch cwd.
-    os.chdir(workspace_root())
 
     # 3. Drive one real turn through the actual command loop and assert the
     # documented terminal sequence (ready -> ack -> content... -> complete ->
@@ -1180,21 +1210,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agui", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    # gh #83: --traceback / --debug opts into the crash-location view. langstage-core
-    # (>=1.0.32) includes the failing turn's Python traceback in the terminal `error`
-    # frame ONLY when LANGSTAGE_DEBUG is set, so translate the flag into that env for the
-    # turn — the error sinks then render the frame's `traceback` (stderr in text mode; in
-    # the raw / --json frame as-is). LANGSTAGE_DEBUG=1 on its own is already honored (core
-    # reads it directly), which is the env path for the extension / CI where argv can't be
-    # extended. Default off -> the error frame is byte-identical to today's.
-    if args.traceback:
-        os.environ["LANGSTAGE_DEBUG"] = "1"
-
     # Same resolution chain as every other deep-agent surface:
     # defaults < langstage.toml < LANGSTAGE_* env < CLI flags.
     cfg = HostConfig.resolve(
         overrides={"agent_spec": args.agent, "workspace_root": args.workspace}
     )
+
+    # gh #83 / #90: the crash-location traceback (gh #83) has THREE interchangeable opt-ins
+    # that are meant to be layers of ONE setting on the family config chain (defaults <
+    # langstage.toml < LANGSTAGE_* env < CLI flags): the --traceback/--debug flag,
+    # LANGSTAGE_DEBUG=1 in the env, and debug = true in langstage.toml. langstage-core
+    # (>=1.0.32) includes the failing turn's Python traceback in the terminal `error` frame
+    # ONLY when LANGSTAGE_DEBUG is set, so fold ALL the sources into that single gate: the
+    # flag (args.traceback) OR the resolved cfg.debug — which HostConfig already layered
+    # from the toml `debug` key + LANGSTAGE_DEBUG env (so the env sibling is covered here
+    # too, and core reads it directly regardless). Set AFTER resolve() so cfg.debug is
+    # available. gh #90: the toml layer used to be dropped — only the flag/env turned the
+    # traceback on — so `debug = true` silently did nothing; now it's honored like its
+    # siblings. Default off -> the error frame is byte-identical to today's.
+    if args.traceback or cfg.debug:
+        os.environ["LANGSTAGE_DEBUG"] = "1"
 
     if args.show_config:
         # This is a pure stdio sidecar — it never opens a socket or renders a
@@ -1292,8 +1327,17 @@ def main(argv: list[str] | None = None) -> int:
     # the agent reads (canonical + legacy names) and records it as the active
     # workspace for workspace_root(). Replaces the manual env-assign (gh #19).
     apply_workspace(cfg.workspace_root)
+    # Operate the agent from the workspace as cwd (ADR 0006). gh #88: enter the workspace
+    # BEFORE importing the agent (was: AFTER load_agent_spec), so an agent that does
+    # module-level (import-time) relative I/O is imported the same way the extension spawns
+    # the sidecar — cwd == workspace — not from the launch cwd. A relative -a ./x.py:graph
+    # is absolutized against the launch cwd first (cf. cli gh #30), so it still loads from
+    # where the user pointed; and a bring-your-own agent's raw relative file writes at both
+    # import time and turn time land in the workspace. Single-process, single-agent.
+    resolved_spec = _absolutize_spec_path(spec)
+    os.chdir(workspace_root())
     try:
-        graph = load_agent_spec(spec)
+        graph = load_agent_spec(resolved_spec)
     except Exception as exc:  # noqa: BLE001
         msg = f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}"
         # gh #78: a load failure honors the same front-door contract as every other
@@ -1302,12 +1346,6 @@ def main(argv: list[str] | None = None) -> int:
         # NDJSON frame on the raw stdio loop. That routing now lives in fail() itself (gh
         # #84), so this path is just a fail() call like the others.
         return fail(msg)
-
-    # Operate the agent from the workspace as cwd (ADR 0006), AFTER resolving the
-    # spec (a relative -a ./x.py:graph must resolve against the invocation cwd, cf.
-    # cli gh #30) — so a bring-your-own agent's raw relative file writes land in the
-    # workspace instead of the launch cwd, matching cli. Single-process, single-agent.
-    os.chdir(workspace_root())
 
     # One-shot: drive a single turn and print the reply, then exit — no interactive
     # command loop, no caller-crafted NDJSON + shutdown line (gh #48).

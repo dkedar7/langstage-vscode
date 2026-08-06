@@ -1802,6 +1802,89 @@ def test_selfcheck_drives_turn_from_workspace_cwd(monkeypatch, tmp_path, capsys)
     assert Path((ws / "agent_wrote_here.txt").read_text()).resolve() == ws.resolve()
 
 
+# ── gh #88: the agent module is IMPORTED from the workspace cwd ──
+#
+# gh #79 moved the preflight TURN into the workspace, but the chdir still landed AFTER
+# load_agent_spec() imported the module — so an agent that does module-level (import-time)
+# relative I/O (loading a prompt/config/data file) was imported from the LAUNCH cwd. In the
+# real extension run path that's invisible (the extension spawns the sidecar with cwd ==
+# workspace), but the documented preflight (--selfcheck/--message with --workspace from
+# another dir) false-FAILed a working agent. The chdir now happens BEFORE the import in both
+# the run path and --selfcheck; a relative -a spec is absolutized against the launch cwd
+# first so it still loads from where the user pointed.
+
+
+def _import_probe_agent(tmp_path):
+    """Write an agent that at IMPORT time records os.getcwd() and reads a WORKSPACE-relative
+    file (prompt.txt). The file exists only in the workspace, so an import from the launch
+    cwd FileNotFoundError's — proving where the module was imported from."""
+    agent = tmp_path / "import_probe.py"
+    agent.write_text(
+        "import os\n"
+        "_IMPORT_CWD = os.getcwd()\n"
+        "with open('prompt.txt') as f:\n"            # import-time relative read
+        "    _SYS = f.read().strip()\n"
+        "from langgraph.graph import StateGraph, START, END, MessagesState\n"
+        "from langchain_core.messages import AIMessage\n"
+        "def r(state):\n"
+        "    return {'messages': [AIMessage(content=_IMPORT_CWD + '|' + _SYS)]}\n"
+        "b = StateGraph(MessagesState)\n"
+        "b.add_node('r', r)\n"
+        "b.add_edge(START, 'r'); b.add_edge('r', END)\n"
+        "graph = b.compile()\n"
+    )
+    return agent
+
+
+def test_message_imports_agent_from_workspace_cwd(monkeypatch, tmp_path, capsys):
+    # gh #88: the run path chdirs into the workspace BEFORE importing the agent, so an
+    # agent that reads a workspace-relative file AT IMPORT TIME loads it. Launched from a
+    # DIFFERENT cwd (tmp_path) with --workspace pointing at ws; without the fix the import
+    # runs at the launch cwd and FileNotFoundError's on prompt.txt.
+    from pathlib import Path
+
+    _isolate_config(monkeypatch, tmp_path)  # chdir's to tmp_path (the launch cwd)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "prompt.txt").write_text("hello-from-workspace")
+    agent = _import_probe_agent(tmp_path)  # agent lives OUTSIDE the workspace
+    rc = main(["--agent", f"{agent}:graph", "--workspace", str(ws), "--message", "hi"])
+    out = capsys.readouterr().out
+    assert rc == 0, out  # did NOT false-FAIL: the import-time relative read succeeded
+    import_cwd, _, sys_txt = out.strip().partition("|")
+    assert Path(import_cwd).resolve() == ws.resolve()  # module was imported FROM the workspace
+    assert sys_txt == "hello-from-workspace"           # ...and read the workspace-relative file
+
+
+def test_selfcheck_imports_agent_from_workspace_cwd(monkeypatch, tmp_path, capsys):
+    # gh #88: the documented preflight (--selfcheck --workspace, run from another dir) must
+    # import the agent from the workspace too, so an agent that does import-time relative
+    # I/O is not false-FAILed. prompt.txt exists only in ws; a launch-cwd import would raise
+    # FileNotFoundError and FAIL the preflight (rc 1). With the fix the preflight is green.
+    _isolate_config(monkeypatch, tmp_path)  # chdir's to tmp_path (the launch cwd)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "prompt.txt").write_text("hello-from-workspace")
+    agent = _import_probe_agent(tmp_path)
+    rc = main(["--selfcheck", "--agent", f"{agent}:graph", "--workspace", str(ws)])
+    assert rc == 0, capsys.readouterr().err  # was a false FAIL: FileNotFoundError at import
+
+
+def test_absolutize_spec_path_leaves_dotted_and_bare_specs_untouched():
+    # gh #88 unit: only a FILE-PATH spec is absolutized (so a later chdir can't move it);
+    # a dotted module spec and a suffix-less spec pass through unchanged (core handles them).
+    import os
+
+    from langstage_vscode.sidecar import _absolutize_spec_path
+
+    assert _absolutize_spec_path("langstage_core.demo.stub:graph") == "langstage_core.demo.stub:graph"
+    assert _absolutize_spec_path("no_colon_here") == "no_colon_here"
+    # A relative file-path spec becomes absolute against the CURRENT cwd, obj name preserved.
+    out = _absolutize_spec_path("./agent.py:graph")
+    assert out == f"{os.path.abspath('./agent.py')}:graph"
+    assert os.path.isabs(out.rpartition(":")[0])
+
+
 # ── gh #80: a valid-JSON non-object line errors gracefully (no crash) ──
 #
 # A line that is valid JSON but not an object (a bare string/number/array/null/bool)
@@ -1963,6 +2046,24 @@ def test_message_env_var_enables_traceback_without_flag(monkeypatch, tmp_path, c
     spec = _deep_crash_agent(tmp_path)
     assert main(["--agent", spec, "--message", "hi"]) == 1
     assert "Traceback (most recent call last)" in capsys.readouterr().err
+
+
+def test_message_toml_debug_true_enables_traceback(monkeypatch, tmp_path, capsys):
+    # gh #90: `debug = true` in langstage.toml is the THIRD opt-in for the crash-location
+    # traceback (alongside --traceback and LANGSTAGE_DEBUG=1) — the toml layer of one
+    # setting on the config chain. It used to be silently ignored (only the flag/env layers
+    # worked). With debug=true in the toml and NO env, NO flag, a crashing agent must now
+    # show the full Python traceback on stderr — identical to the env/flag paths.
+    _isolate_config(monkeypatch, tmp_path)  # strips LANGSTAGE_DEBUG; chdir + CONFIG_HOME=tmp_path
+    monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+    (tmp_path / "langstage.toml").write_text("debug = true\n")
+    spec = _deep_crash_agent(tmp_path)
+    assert main(["--agent", spec, "--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""                       # stdout stays the clean reply channel
+    assert "error: KeyError" in captured.err
+    assert "Traceback (most recent call last)" in captured.err
+    assert "in helper" in captured.err              # names WHERE it crashed, via the toml layer
 
 
 def test_message_json_mode_carries_traceback_in_error_frame(monkeypatch, tmp_path, capsys):
