@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.26] - 2026-08-08
+
+### Fixed
+- **`cancel` now actually aborts the in-flight turn instead of only relabelling its natural-completion
+  frame (gh #93).** The streaming `cancel` command (gh #67 / #69) did the "keep the process/session
+  alive" half correctly but not the "stop pumping the AG-UI stream and cancel the underlying task" half:
+  the sidecar's single-threaded pump blocked inside one `agen.__anext__()` for the whole turn, so a
+  `cancel` was only observed *between frames* — never during a turn that produced **no** frames for
+  seconds (a node awaiting a slow model/tool, the textbook cancel case). The underlying turn therefore
+  ran to **full natural completion**; the sidecar withheld/discarded the real reply and emitted `cancelled`
+  only at the moment the turn would have finished on its own. Cancel interrupted no work, saved no time,
+  and (worse) the reply the graph actually produced was silently dropped from the stream while the turn
+  still ran through the checkpointer — an assistant turn the user never saw leaking into the next turn's
+  memory. The pump (`stream_events_sync`) now polls the cancel predicate **while awaiting each frame** and,
+  when it fires, `task.cancel()`s the in-flight turn's task — which throws `CancelledError` into the core
+  async generator at its current await point (its `aclose()` teardown runs and the ag-ui run task is torn
+  down), aborting the turn at once and yielding a `STREAM_CANCELLED` sentinel — **without** touching the
+  session/checkpointer, so the next turn on that thread still has memory. The between-frames check (gh #67)
+  is kept for turns that *are* streaming frames. Verified against the issue's repro (a node awaiting ~6s in
+  0.2s slices, `cancel` ~1s in): `cancelled` now arrives ~0.05s after `cancel` (was ~5.5s — the turn's
+  natural end), the node's reply is never produced (not produced-then-swallowed), no `complete`/`finished-normally`
+  frame is emitted, and the session survives for the next command. This is sidecar-local — the core
+  `iter_*` generators already respond to task cancellation; the gap was the sidecar not cancelling the task.
+
 ## [0.5.25] - 2026-08-06
 
 ### Fixed
