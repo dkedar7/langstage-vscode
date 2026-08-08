@@ -5,6 +5,7 @@ Guarded by importorskip as a safety net, but base deps pull the AG-UI runtime
 (core's [agui] extra) so CI always runs these. The path drives a real LangGraph
 agent, so these use real compiled graphs.
 """
+import asyncio
 import io
 import json
 import time
@@ -264,6 +265,118 @@ def test_cancel_stops_a_streaming_turn_mid_stream_and_keeps_the_session():
     assert counts, frames
     assert counts[0] == "count=1"                 # warmup saw only its own human message
     assert int(counts[-1].split("=")[1]) > 1      # turn 3 remembered -> checkpointer survived
+
+
+def _slow_cancellable_graph(*, slices: int, slice_s: float):
+    """A graph whose node, on the human input ``"LONG"``, awaits ~``slices * slice_s``
+    seconds in cooperatively-cancellable ``asyncio.sleep`` slices and produces NO frames
+    until the very end (the gh #93 shape — a stand-in for a slow async model/tool call,
+    the textbook case that *is* cancellable). On anything else it returns ``count=<n>``
+    immediately, so a later turn proves the thread's checkpointer survived a cancel."""
+    async def respond(state):
+        from langchain_core.messages import HumanMessage
+
+        msgs = state["messages"]
+        last_human = next((m for m in reversed(msgs) if isinstance(m, HumanMessage)), None)
+        text = last_human.content if last_human else ""
+        if text == "LONG":
+            for _ in range(slices):
+                await asyncio.sleep(slice_s)  # yields to the loop; abortable on cancel
+            return {"messages": [AIMessage(content="finished-normally")]}
+        return {"messages": [AIMessage(content=f"count={len(msgs)}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+def test_cancel_aborts_a_no_frame_turn_promptly_not_at_natural_end():
+    # gh #93: the 0.5.25 bug. A turn that produces NO frames for seconds (a node awaiting a
+    # slow model/tool) ran to FULL natural completion; the sidecar withheld/discarded its
+    # reply and emitted `cancelled` only at the moment the turn would have finished on its
+    # own — so `cancel` aborted no work and saved no time. The pump now polls the cancel
+    # WHILE awaiting each frame and cancels the in-flight task, so the turn aborts
+    # ~immediately at cancel time. This mirrors the issue's repro (a node awaiting in slices)
+    # over the real raw stdio path (enable_cancel=True): assert `cancelled` arrives far
+    # sooner than natural completion, the natural reply is never produced, and the loop
+    # survives for a subsequent command.
+    import threading
+
+    NODE_SECONDS = 10.0  # the LONG node would run this long if it were NOT aborted
+    graph = _slow_cancellable_graph(slices=200, slice_s=0.05)
+
+    warm_done = threading.Event()     # warmup turn finished -> its memory is committed
+    long_in_flight = threading.Event()  # the LONG turn's ack was seen -> it is streaming
+    timings: dict = {}
+
+    class _GatedStdin:
+        def __iter__(self):
+            yield json.dumps({"type": "message", "session_id": "s", "content": "warmup"})
+            warm_done.wait(15)
+            yield json.dumps({"type": "message", "session_id": "s", "content": "LONG"})
+            long_in_flight.wait(15)
+            time.sleep(0.3)  # let the node get genuinely mid-await (~9.7s would remain)
+            timings["cancel_sent"] = time.monotonic()
+            yield json.dumps({"type": "cancel", "session_id": "s"})
+            yield json.dumps({"type": "message", "session_id": "s", "content": "again"})
+            yield json.dumps({"type": "shutdown"})
+
+    frames: List[dict] = []
+    acks = {"n": 0}
+
+    class _WatchStdout:
+        def write(self, s: str) -> None:
+            for line in s.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                f = json.loads(line)
+                frames.append(f)
+                t = f.get("type")
+                if t == "turn_end" and not warm_done.is_set():
+                    warm_done.set()
+                elif t == "ack":
+                    acks["n"] += 1
+                    if acks["n"] == 2 and not long_in_flight.is_set():
+                        long_in_flight.set()  # the LONG (2nd) turn has started
+                elif t == "cancelled" and "cancelled_at" not in timings:
+                    timings["cancelled_at"] = time.monotonic()
+
+        def flush(self) -> None:
+            pass
+
+    run(graph, _GatedStdin(), _WatchStdout(), enable_cancel=True)
+
+    types = [f["type"] for f in frames]
+    assert "error" not in types, [f for f in frames if f.get("type") == "error"]
+    # A distinct `cancelled` terminal frame, immediately followed by turn_end.
+    assert "cancelled" in types, types
+    ci = types.index("cancelled")
+    assert frames[ci]["session_id"] == "s"
+    assert types[ci + 1] == "turn_end"
+
+    # Aborted, not run-to-completion-then-swallowed: the LONG turn emitted no `complete`,
+    # and the node's natural reply was NEVER produced (the graph's `respond` was cancelled
+    # mid-await, so "finished-normally" never reached the wire — nor the checkpoint).
+    second_ack = [i for i, t in enumerate(types) if t == "ack"][1]
+    assert "complete" not in types[second_ack:ci]
+    assert not any(f.get("content") == "finished-normally" for f in frames), frames
+
+    # Prompt: `cancelled` arrived far sooner than the node's natural completion. With the
+    # fix it is ~0.05s; the 0.5.25 bug would surface it only at ~NODE_SECONDS. A wide
+    # margin (half the node duration) keeps CI robust while still catching a regression.
+    assert {"cancel_sent", "cancelled_at"} <= set(timings), timings
+    latency = timings["cancelled_at"] - timings["cancel_sent"]
+    assert latency < NODE_SECONDS / 2, f"cancel took {latency:.2f}s (node is {NODE_SECONDS}s)"
+
+    # The session survived the cancel: turn 3 ran on the SAME session and remembered the
+    # warmup turn, proving the process/session/checkpointer were kept alive (not torn down).
+    counts = [f["content"] for f in frames
+              if f["type"] == "content" and str(f.get("content", "")).startswith("count=")]
+    assert counts, frames
+    assert int(counts[-1].split("=")[1]) > 1  # turn 3 saw more than its own message
 
 
 def test_no_task_destroyed_warning_leaks_to_stderr(tmp_path):

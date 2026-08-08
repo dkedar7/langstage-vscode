@@ -329,15 +329,26 @@ def _run_turn_agui(
     frame (so the session is left paused awaiting a decision, gh #65), and whether it
     was stopped early by a cooperative ``cancel`` (gh #67).
 
-    ``should_cancel`` (raw stdio path only) is checked between frames; when it fires,
-    the AG-UI generator is closed — its ``finally: aclose()`` cancels the pending
-    ag-ui run task and tears the turn down WITHOUT touching the session/checkpointer,
-    so the next turn on this thread still has memory — and the turn returns cancelled.
+    ``should_cancel`` (raw stdio path only) drives a cooperative ``cancel`` on TWO
+    fronts, both WITHOUT touching the session/checkpointer (so the next turn on this
+    thread still has memory):
+
+    - it is forwarded to the pump, which polls it WHILE awaiting each frame and, when
+      it fires, cancels the in-flight turn's task — aborting the underlying ag-ui run
+      at its next await point (its ``aclose()`` teardown runs) and yielding the
+      ``STREAM_CANCELLED`` sentinel. This is the gh #93 fix: it stops a turn that
+      produces NO frames for seconds (a node awaiting a slow model/tool), which the
+      between-frames check alone can never catch;
+    - it is ALSO checked here between frames, so when frames ARE flowing a ``cancel``
+      still stops the stream promptly at the next frame boundary (gh #67).
+
+    Either way the turn returns cancelled and the generator is closed (running the
+    same teardown the natural-end path runs).
 
     ``extractors`` (gh #77) are forwarded to the AG-UI stream so an ``extraction`` frame
     is emitted when one is wired (the ``--demo=tools`` path); ``()`` otherwise.
     """
-    from .agui_stream import stream_events_sync
+    from .agui_stream import STREAM_CANCELLED, stream_events_sync
 
     thread_id = config.get("configurable", {}).get("thread_id", "default")
     saw_interrupt = False
@@ -348,12 +359,20 @@ def _run_turn_agui(
         resume=resume,
         max_result_len=max_result_len,
         extractors=extractors,
+        should_cancel=should_cancel,
     )
     try:
         for frame in stream:
-            # gh #67: cooperative cancel. Check before emitting the next frame so a
-            # client `cancel` (surfaced here between frames) stops the stream promptly;
-            # closing the generator runs its teardown and cancels the ag-ui task.
+            # gh #93: the pump aborted the turn WHILE it awaited a frame (a `cancel` on a
+            # turn producing no frames — the case the between-frames check below can never
+            # catch, since it only runs when a frame arrives). The underlying task is
+            # already cancelled; stop here and report cancelled.
+            if frame is STREAM_CANCELLED:
+                stream.close()
+                return saw_interrupt, True
+            # gh #67: cooperative cancel between frames. When frames ARE flowing, a client
+            # `cancel` (surfaced here between frames) stops the stream promptly; closing the
+            # generator runs its teardown and cancels the ag-ui task.
             if should_cancel is not None and should_cancel():
                 stream.close()
                 return saw_interrupt, True
