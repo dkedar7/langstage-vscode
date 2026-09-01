@@ -259,6 +259,14 @@ def run(
             content = cmd.get("content", "")
             if not content:
                 emit({"type": "error", "error": "message requires 'content'"})
+                # gh #118: the rejection is still the END of the turn the client
+                # opened. The protocol docs promise every `message` command
+                # terminates with `turn_end`, and clients — the bundled VS Code
+                # extension's runTurn included — resolve the turn on exactly
+                # that frame. A bare `error` with no `turn_end` leaves the
+                # client's turn pending forever (the stuck-spinner hang). Treat
+                # the rejected message as a zero-length turn: error -> turn_end.
+                emit({"type": "turn_end", "session_id": session_id})
                 continue
             emit({"type": "ack", "ref": "message"})
             agui_message = content
@@ -267,8 +275,11 @@ def run(
             # An empty list is as invalid as a non-list: there's no interrupt to
             # resume, so it must error, not ack + drive a spurious turn — mirroring
             # the `message` path's empty-content rejection above. (gh #33)
+            # gh #118: like the message rejection, the refusal still ends the
+            # turn the resuming client opened — pair the error with `turn_end`.
             if not isinstance(decisions, list) or not decisions:
                 emit({"type": "error", "error": "decision requires a non-empty 'decisions' list"})
+                emit({"type": "turn_end", "session_id": session_id})
                 continue
             # ...and a well-formed decision still needs an interrupt to resume: if this
             # session has none pending, there is nothing to resume, so error rather than
@@ -277,6 +288,9 @@ def run(
             if session_id not in pending_interrupts:
                 emit({"type": "error",
                       "error": f"no interrupt pending for session {session_id!r}"})
+                # gh #118: same as above — a refused resume still terminates the
+                # client's waiting turn with `turn_end`.
+                emit({"type": "turn_end", "session_id": session_id})
                 continue
             emit({"type": "ack", "ref": "decision"})
             agui_resume = {"decisions": decisions}

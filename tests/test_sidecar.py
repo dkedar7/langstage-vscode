@@ -237,6 +237,14 @@ def test_empty_message_reported():
         {"type": "shutdown"},
     ])
     assert any(e["type"] == "error" and "content" in e["error"] for e in events)
+    # gh #118: the rejection still ends the turn the client opened — a rejected
+    # `message` is a zero-length turn, so `turn_end` MUST follow the error. The
+    # bundled extension resolves runTurn only on `turn_end`; without it the chat
+    # spinner hangs forever.
+    ends = [e for e in events if e["type"] == "turn_end"]
+    assert len(ends) == 1 and ends[0].get("session_id") == "default"
+    assert events.index(next(e for e in events if e["type"] == "error")) \
+        < events.index(ends[0])
 
 
 def test_decision_without_list_reported():
@@ -251,7 +259,9 @@ def test_empty_decision_list_reported():
     assert any(e["type"] == "error" and "decisions" in e["error"] for e in events)
     # And it must NOT ack or run a turn.
     assert not any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
-    assert not any(e.get("type") == "turn_end" for e in events)
+    # gh #118: the refusal still terminates the resuming client's waiting turn —
+    # a rejected decision pairs its error with a zero-length `turn_end`.
+    assert any(e.get("type") == "turn_end" for e in events)
 
 
 def test_graph_error_surfaced():
@@ -1522,7 +1532,7 @@ def test_repl_bare_verb_with_nothing_pending_is_still_an_ordinary_message():
 def test_decision_with_no_pending_interrupt_errors_not_spurious_turn():
     # gh #65: the headline. A valid decision on a fresh, never-interrupted session is
     # answered with an `error` frame and drives NO turn — no ack, no content, no
-    # (false) `complete`, no turn_end. Contrast the #33 empty-list case, which errors
+    # (false) `complete`. Contrast the #33 empty-list case, which errors
     # on shape; this one is well-shaped but has nothing to resume.
     events = drive(_stub(), [
         {"type": "decision", "session_id": "fresh", "decisions": [{"type": "approve"}]},
@@ -1531,7 +1541,9 @@ def test_decision_with_no_pending_interrupt_errors_not_spurious_turn():
     assert any(e["type"] == "error" and "no interrupt pending for session 'fresh'" in e["error"]
                for e in events), [e for e in events if e["type"] == "error"]
     assert not any(e.get("type") == "ack" and e.get("ref") == "decision" for e in events)
-    assert not any(e["type"] == "turn_end" for e in events)
+    # gh #118: the refusal pairs the error with a zero-length `turn_end` so a
+    # client that keyed its wait on the documented terminal frame stops waiting.
+    assert any(e["type"] == "turn_end" and e.get("session_id") == "fresh" for e in events)
     assert not any(e["type"] == "complete" for e in events)
     assert not any(e["type"] == "content" for e in events)
 
