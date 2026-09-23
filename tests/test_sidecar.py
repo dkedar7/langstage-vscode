@@ -9,6 +9,7 @@ main()'s config resolution.
 """
 import io
 import json
+import pytest
 
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -2221,3 +2222,64 @@ def test_checkpointerless_graph_isolates_distinct_sessions():
     turns = _turns(events)
     assert _reply(turns[0]) == "seen 1"
     assert _reply(turns[1]) == "seen 1"  # session b is isolated from session a
+
+
+# ── gh #133: distinct conversations must never share memory ─────────────────
+#
+# The extension used to send EVERY chat conversation's turns with the constant
+# ``session_id: "vscode"`` and rely on a first-turn-only process restart for isolation,
+# so resuming conversation A after using B landed A's follow-up on B's thread in the
+# warm process (cross-chat memory bleed). The extension now mints a per-conversation
+# ``session_id``; these pin the sidecar half of that contract: in ONE long-lived process,
+# interleaved turns of two session_ids each see ONLY their own history — for a graph with
+# its own checkpointer and for one relying on the sidecar's auto-attached in-memory saver.
+
+
+def _heard_graph(checkpointer):
+    """Echo every human message the thread has heard, so any foreign text leaking in
+    from another session's thread is visible verbatim in the reply (the issue's repro)."""
+    def respond(state):
+        heard = " | ".join(m.content for m in state["messages"]
+                           if m.__class__.__name__ == "HumanMessage")
+        return {"messages": [AIMessage(content=f"heard: {heard}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile(checkpointer=checkpointer)
+
+
+@pytest.mark.parametrize("checkpointer", [MemorySaver(), None],
+                         ids=["own-checkpointer", "auto-attached"])
+def test_interleaved_conversations_do_not_share_memory(checkpointer):
+    # gh #133: A1, B1, then A resumed (A2), then B resumed (B2) — all in one process.
+    events = drive(_heard_graph(checkpointer), [
+        {"type": "message", "session_id": "vscode-A", "content": "A secret"},
+        {"type": "message", "session_id": "vscode-B", "content": "B PIN 4821"},
+        {"type": "message", "session_id": "vscode-A", "content": "A again"},
+        {"type": "message", "session_id": "vscode-B", "content": "B again"},
+        {"type": "shutdown"},
+    ])
+    turns = _turns(events)
+    assert len(turns) == 4, [e["type"] for e in events]
+    assert [t[-1]["session_id"] for t in turns] == ["vscode-A", "vscode-B",
+                                                    "vscode-A", "vscode-B"]
+    # Each resumed conversation remembers ITS OWN earlier turn...
+    assert _reply(turns[2]) == "heard: A secret | A again"
+    assert _reply(turns[3]) == "heard: B PIN 4821 | B again"
+    # ...and never sees the other conversation's text.
+    assert "B PIN" not in _reply(turns[0]) + _reply(turns[2])
+    assert "A secret" not in _reply(turns[1]) + _reply(turns[3])
+
+
+def test_shared_session_id_is_what_bled_across_conversations():
+    # gh #133, the bug's shape: two conversations sent under the SAME constant
+    # session_id (what the extension used to do) share one thread, so the "resumed"
+    # conversation sees the other's text. Pins WHY the extension must mint distinct ids.
+    events = drive(_heard_graph(MemorySaver()), [
+        {"type": "message", "session_id": "vscode", "content": "B PIN 4821"},
+        {"type": "message", "session_id": "vscode", "content": "A resumed"},
+        {"type": "shutdown"},
+    ])
+    assert "B PIN 4821" in _reply(_turns(events)[1])
