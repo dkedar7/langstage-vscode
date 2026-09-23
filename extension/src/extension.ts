@@ -83,6 +83,16 @@ async function handler(
   const python =
     config.get<string>('pythonPath') || legacy.get<string>('pythonPath') || 'python';
 
+  // gh #118: an empty prompt (`@langstage` + Enter) would reach the sidecar as a
+  // `message` with empty `content`, which it rejects with an `error` frame —
+  // historically with no `turn_end`, leaving runTurn's promise pending forever
+  // and the spinner stuck. Short-circuit here with a hint instead of spawning
+  // a doomed turn. (The sidecar now also emits `turn_end` on that rejection.)
+  if (!request.prompt || !request.prompt.trim()) {
+    stream.markdown('Please type a message for @langstage — the prompt was empty.');
+    return;
+  }
+
   const workspace =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
