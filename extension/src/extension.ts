@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as readline from 'readline';
 import { PassThrough } from 'stream';
 
@@ -70,12 +71,49 @@ function sidecarKey(python: string, agentSpec: string, workspace: string): strin
   return [python, agentSpec, workspace].join('|');
 }
 
+/** ChatResult.metadata key carrying a conversation's sidecar `session_id`. */
+const SESSION_KEY = 'langstageSessionId';
+
+/**
+ * The `session_id` (hence LangGraph `thread_id`) for THIS chat conversation (gh #133).
+ *
+ * Every conversation used to share the constant `session_id: 'vscode'`, and the only
+ * isolation was a process restart on a conversation's first turn — which never fires
+ * when you RESUME an earlier chat. So resuming chat A after using chat B reused B's warm
+ * process and landed A's follow-up on B's thread: A saw B's messages (and with a durable
+ * checkpointer, every chat ever shared one thread across restarts too).
+ *
+ * VS Code exposes no conversation id, but it does replay each turn's `ChatResult` in
+ * `chatContext.history`. So a conversation's first turn mints a random id and returns it
+ * in the result metadata; every later turn reads it back from the newest response turn
+ * that carries it. A conversation with no id in its history (e.g. one begun before this
+ * fix) gets a FRESH id rather than a derived one: a content-derived id could collide
+ * between two chats that start with the same prompt — worst case here is a clean thread,
+ * never another chat's memory.
+ */
+function conversationSessionId(history: vscode.ChatContext['history']): string {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const turn = history[i];
+    if (turn instanceof vscode.ChatResponseTurn) {
+      const id: unknown = turn.result.metadata?.[SESSION_KEY];
+      if (typeof id === 'string' && id) {
+        return id;
+      }
+    }
+  }
+  return `vscode-${randomUUID()}`;
+}
+
 async function handler(
   request: vscode.ChatRequest,
   chatContext: vscode.ChatContext,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
-): Promise<void> {
+): Promise<vscode.ChatResult> {
+  // Returned on every path so the NEXT turn of this conversation finds its id (gh #133).
+  const sessionId = conversationSessionId(chatContext.history);
+  const result: vscode.ChatResult = { metadata: { [SESSION_KEY]: sessionId } };
+
   const config = vscode.workspace.getConfiguration('langstage');
   const legacy = vscode.workspace.getConfiguration('deepagent');
   const agentSpec =
@@ -90,28 +128,29 @@ async function handler(
   // a doomed turn. (The sidecar now also emits `turn_end` on that rejection.)
   if (!request.prompt || !request.prompt.trim()) {
     stream.markdown('Please type a message for @langstage — the prompt was empty.');
-    return;
+    return result;
   }
 
   const workspace =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
-  // A fresh conversation (empty history on its first turn) must not inherit the
-  // previous conversation's thread state. The sidecar keys memory off a single
-  // `session_id`, so scope memory to a conversation by starting a clean process
-  // when a new one begins; subsequent turns reuse it (that reuse is the gh #54 fix).
+  // Memory isolation between conversations is the per-conversation `sessionId`
+  // above (gh #133) — NOT this restart, which only fires on a conversation's first
+  // turn. A new chat still starts a clean process (dropping the previous chat's
+  // in-process state); subsequent turns reuse it (that reuse is the gh #54 fix).
   if (chatContext.history.length === 0) {
     disposeSidecar();
   }
 
   try {
     const sc = getOrCreateSidecar(python, agentSpec, workspace);
-    await runTurn(sc, request.prompt, stream, token);
+    await runTurn(sc, sessionId, request.prompt, stream, token);
   } catch (err) {
     // A broken sidecar must not stay cached and poison every later turn.
     disposeSidecar();
     stream.markdown(`\n\n❌ ${err instanceof Error ? err.message : String(err)}`);
   }
+  return result;
 }
 
 /** Reuse the live sidecar if its config matches; otherwise (re)spawn one. */
@@ -219,12 +258,13 @@ function spawnSidecar(
 
 /**
  * Send one user message to the (persistent) sidecar and pump its events into the
- * chat stream until the turn ends. The same `session_id` across turns maps to a
- * stable LangGraph `thread_id`, so a checkpointer-backed agent remembers prior
- * turns (gh #54).
+ * chat stream until the turn ends. The conversation's `sessionId` maps to a stable
+ * LangGraph `thread_id`, so a checkpointer-backed agent remembers prior turns
+ * (gh #54) — and only this conversation's turns (gh #133).
  */
 function runTurn(
   sc: Sidecar,
+  sessionId: string,
   prompt: string,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
@@ -249,10 +289,10 @@ function runTurn(
           // The turn is not resolved here either: the sidecar answers with
           // `cancelled` then `turn_end`, and the normal frame loop below ends the
           // turn on `turn_end` without tearing the process down, so the next turn
-          // reuses the same warm process (same session_id -> same thread_id).
+          // reuses the same warm process (same sessionId -> same thread_id).
           try {
             sc.proc.stdin?.write(
-              JSON.stringify({ type: 'cancel', session_id: 'vscode' }) + '\n',
+              JSON.stringify({ type: 'cancel', session_id: sessionId }) + '\n',
             );
           } catch {
             // stdin is already gone (the process is dying) — fall back to a clean
@@ -280,7 +320,7 @@ function runTurn(
         sc.proc.once('exit', exitHandler);
 
         sc.proc.stdin.write(
-          JSON.stringify({ type: 'message', session_id: 'vscode', content: prompt }) + '\n',
+          JSON.stringify({ type: 'message', session_id: sessionId, content: prompt }) + '\n',
         );
       }),
   );

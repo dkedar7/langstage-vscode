@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.27] - 2026-09-23
+
+_Also ships VS Code extension 0.3.2 (`extension/package.json` 0.3.1 -> 0.3.2)._
+
+### Security
+- **Each VS Code chat conversation now gets its own `session_id`, so one chat's memory can no longer
+  bleed into another (gh #133).** The extension sent every turn of every conversation with the constant
+  `session_id: "vscode"` (hence one LangGraph `thread_id`) and isolated conversations only by restarting
+  the sidecar on a conversation's **first** turn. Resuming an earlier chat never hits that restart, so
+  after using chat B, a follow-up in chat A reused B's warm process and landed on B's thread: A's reply
+  was built from B's messages (anything pasted there included), with no signal. With a durable
+  checkpointer the constant id was worse still: every chat, across restarts, shared one thread. The
+  extension now mints a random `vscode-<uuid>` on a conversation's first turn, returns it in the
+  `ChatResult` metadata, and reads it back from `chatContext.history` on later turns, sending it on both
+  `message` and `cancel`. A conversation with no id in its history (one begun before this release) gets a
+  fresh id, never a derived one that could collide with another chat's. The new-chat restart is kept, so
+  resuming an older chat after starting a new one now begins on a clean in-process thread instead of
+  someone else's. The sidecar already isolated threads per `session_id`; new tests pin that interleaved
+  turns of two ids in one process each see only their own history (with the graph's own checkpointer and
+  with the auto-attached one) and that a shared id is what bled.
+
+### Fixed
+- **A rejected `message` or `decision` now ends its turn with `turn_end`, so an empty `@langstage` prompt
+  no longer hangs the chat forever (gh #118, PR #120 by @agenticarus).** An empty-`content` `message`, a
+  malformed `decision` (gh #33) and a `decision` with no pending interrupt (gh #65) emitted only an
+  `error` frame; the extension ends a turn on `turn_end`, so the spinner never stopped. Each rejection is
+  now a zero-length turn, `error → turn_end` with no `ack`, and the README's protocol section documents
+  that shape next to the agent-failure `ack → error → turn_end`. The extension also short-circuits an
+  empty or whitespace-only prompt with a hint instead of sending it. Thanks to @agenticarus for the fix.
+
 ## [0.5.26] - 2026-08-08
 
 ### Fixed

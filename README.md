@@ -299,6 +299,12 @@ with no turn in flight for the session is answered with an `error` frame
 > `error` frame. On the agent-failure path there is no `complete` — the sequence
 > is `ack → error → turn_end` — so don't key turn-completion off `complete` alone.
 >
+> A **rejected** command is still a (zero-length) turn: a `message` with no `content`,
+> a malformed `decision`, or a `decision` with no pending interrupt emits
+> `error → turn_end` — **no `ack`**, since nothing ran — so a client that waits for
+> `turn_end` always stops waiting (gh #118). `turn_end` is the one frame every
+> `message`/`decision` is guaranteed to end with.
+>
 > Two more terminal shapes are *not* `complete`. An **interrupt** turn emits
 > `interrupt → complete → turn_end`: it *does* still emit `complete`, but the agent
 > produced no reply — it is paused awaiting a decision, so detect the pause via the
@@ -322,11 +328,15 @@ with no turn in flight for the session is answered with an `error` frame
 > checkpointer — like any `MemorySaver` — lives only in that process, so its memory
 > is lost when the process ends. The **VS Code extension keeps one sidecar process
 > alive per conversation** — it spawns the sidecar on the first `@langstage` message
-> and reuses that same process (and the same `session_id`) for every following turn
-> (gh #54) — so that in-process memory persists across turns in chat, not just when
-> you drive the stdio protocol by hand. The process is restarted on a config change
-> (interpreter / agent spec) and when you start a new chat, so a new conversation
-> begins with a clean thread. If you drive the sidecar yourself, keep **one process**
+> and reuses that same process for every following turn (gh #54) — so that in-process
+> memory persists across turns in chat, not just when you drive the stdio protocol by
+> hand. Each chat conversation gets its **own `session_id`** (a random id minted on its
+> first turn and carried in the chat result metadata), so two conversations never share
+> a thread — not when you resume an earlier chat, and not across restarts with a
+> durable checkpointer (gh #133). The process is restarted on a config change
+> (interpreter / agent spec) and when you start a new chat; resuming an older chat
+> after that starts it on a clean in-process thread (a durable checkpointer keeps its
+> history). If you drive the sidecar yourself, keep **one process**
 > alive and send each turn to it — a fresh process per message gets a fresh in-memory
 > checkpointer and forgets the prior turn. What survives **across separate processes**
 > (durable memory) is a **persistent** checkpointer (`SqliteSaver`, `PostgresSaver`,
