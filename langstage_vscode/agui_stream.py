@@ -45,13 +45,23 @@ def ensure_agui_available() -> None:
         raise RuntimeError(_IMPORT_HINT) from e
 
 
-def build_session_agent(graph: Any, *, name: str = "langstage-vscode") -> Any:
+def build_session_agent(
+    graph: Any,
+    *,
+    name: str = "langstage-vscode",
+    configurable: Dict[str, Any] | None = None,
+) -> Any:
     """Wrap the graph once (checkpointer attached by the core bridge); thread_id
-    is passed per turn via the session_id, so per-session state persists."""
+    is passed per turn via the session_id, so per-session state persists.
+
+    ``configurable`` (the ``langstage.toml`` ``[configurable]`` table, gh #127) becomes
+    the agent's base ``config={"configurable": ...}``, exactly as ``langstage-agui``
+    forwards it; ag-ui-langgraph adds the per-run ``thread_id``."""
     ensure_agui_available()
     from langstage_core.agui import build_agent
 
-    return build_agent(graph, name=name)
+    config = {"configurable": dict(configurable)} if configurable else None
+    return build_agent(graph, name=name, config=config)
 
 
 async def agui_events(
@@ -74,7 +84,10 @@ async def agui_events(
     interrupt  <- CustomEvent(on_interrupt)
     error      <- RunErrorEvent ; complete at the end.
 
-    ``resume`` (answering an interrupt) rides ``forwarded_props.command.resume``.
+    ``resume`` (answering an interrupt) is handed to core, which sends it on
+    ag-ui-langgraph's standard ``RunAgentInput.resume[]`` (core >=1.0.36, gh #103),
+    falling back to the legacy ``forwarded_props.command.resume`` only on an older
+    adapter.
 
     The mapping itself lives in the core (``agui.iter_event_frames``, 0.6.16) —
     shared with the web ``SessionAdapter`` — so a rendering fix lands once.

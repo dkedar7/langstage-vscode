@@ -29,31 +29,19 @@ from collections import deque
 from typing import Any, Callable, Iterable, TextIO
 
 from langstage_core import apply_workspace, load_agent_spec, workspace_root
+# Console-safe writes (gh #42/#51): the extension spawns the sidecar over a cp1252 pipe
+# (and a Western-Windows console is cp1252 too), both `strict`, so a raw write of a
+# non-Latin-1 character (an emoji/CJK char in a reply, a CJK spec or path) would raise
+# UnicodeEncodeError. Every human-readable text path goes through core's shared helper,
+# which backslash-escapes what the stream can't encode (core 1.0.36, replacing the
+# sidecar's own `_write_safe` copy). The JSON protocol path is ASCII via ensure_ascii.
+from langstage_core.console import safe_write
 
 DEFAULT_MAX_RESULT_LEN = 50_000
 
 # Sentinel returned by the command intake when the input stream is exhausted (EOF /
 # closed stdin), so an ordinary line and "no more commands" are never confused.
 _EOF = object()
-
-
-def _write_safe(stream: TextIO, text: str) -> None:
-    """Write ``text`` to ``stream``, degrading any character the stream's encoding
-    can't represent to a backslash escape instead of crashing.
-
-    The VS Code extension spawns the sidecar over a cp1252 pipe (and a Western-
-    Windows console is cp1252 too), both with the ``strict`` error handler — so a
-    raw ``print`` of text carrying a non-Latin-1 character (an emoji/CJK char an LLM
-    emits routinely; a CJK/Cyrillic agent spec or project path) dies with an
-    uncaught ``UnicodeEncodeError`` and emits nothing. Every human-readable text
-    path routes through here so it degrades gracefully; the JSON protocol path is
-    already ASCII-safe via ``ensure_ascii``. Full fidelity is preserved on a UTF-8
-    stream. Shared by ``--show-config`` (gh #42) and one-shot ``--message`` (gh #51)
-    so the two guards can't drift again — the "one shared helper" rationale gh #46
-    used for ``_runnable_graph_error``.
-    """
-    enc = getattr(stream, "encoding", None) or "utf-8"
-    stream.write(text.encode(enc, "backslashreplace").decode(enc, "replace"))
 
 
 def _runnable_graph_error(graph: Any, spec: str | None = None) -> str | None:
@@ -166,6 +154,7 @@ def run(
     max_result_len: int = DEFAULT_MAX_RESULT_LEN,
     enable_cancel: bool = False,
     extractors: Iterable[Any] = (),
+    configurable: dict[str, Any] | None = None,
     **_legacy: Any,  # accepts + ignores the removed stream_mode/agui kwargs
 ) -> None:
     """Drive the command/event loop over the given streams.
@@ -184,6 +173,12 @@ def run(
     ``demo_extractors()`` (the same source the demo graph uses) so the ``extraction``
     frame the README/``--help``/CHANGELOG advertise is actually produced; every other
     caller leaves it ``()`` so a real agent's turns are unaffected.
+
+    ``configurable`` (gh #127) is the ``langstage.toml`` ``[configurable]`` table
+    (``HostConfig.configurable()``), forwarded as the graph's ``config["configurable"]``
+    on every turn, as ``langstage-agui`` does. ag-ui-langgraph sets ``thread_id`` per
+    run from the ``session_id``, so a ``thread_id`` key in the table can't redirect a
+    session. ``None``/``{}`` forwards nothing, as before.
     """
 
     def emit(obj: dict[str, Any]) -> None:
@@ -207,7 +202,7 @@ def run(
     from .agui_stream import build_session_agent
 
     try:
-        agui_agent = build_session_agent(graph)
+        agui_agent = build_session_agent(graph, configurable=configurable)
     except Exception as exc:  # noqa: BLE001 — any build failure becomes an error frame, not a crash
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
         return
@@ -416,35 +411,38 @@ DEMO_SPECS = {
 DEMO_AGENT_SPEC = DEMO_SPECS["echo"]
 
 
-def _absolutize_spec_path(spec: str) -> str:
-    """Make a file-path agent spec absolute against the CURRENT (launch) cwd so a
-    later ``os.chdir(workspace)`` can't change which file it loads.
+def _spec_base_dir(cfg: Any, *, launch_cwd: str, from_config: bool) -> str:
+    """The directory core's ``load_agent_spec(..., base_dir=)`` resolves ``spec`` against.
 
-    gh #88: the sidecar must import the agent module with cwd == the workspace — the
-    same cwd the extension spawns it under (``cwd: workspace``) — so an agent that does
-    module-level (import-time) relative I/O (loading a prompt/config/data file) is
-    imported faithfully rather than from the launch cwd. That means the
-    ``os.chdir(workspace_root())`` has to happen BEFORE ``load_agent_spec()``. But a
-    relative ``-a ./x.py:graph`` must still resolve against the launch cwd (cli
-    semantics, cf. gh #30), so its file path is absolutized HERE, before the chdir —
-    keeping both: the module is found where the user pointed, and it is imported from
-    inside the workspace.
+    The sidecar ``chdir``s into the workspace BEFORE importing the agent (gh #88), so by
+    load time the cwd is no longer where the user typed the spec. Core (>=1.0.36) owns
+    the rest of spec handling: it strips whitespace (gh #135), expands ``~`` (gh #125),
+    rebases a relative file-form ``[agent] spec`` onto its langstage.toml's directory
+    (gh #123), and resolves a relative file path, or retries a project-local dotted
+    ``pkg.mod:attr``, from ``base_dir``. The sidecar only has to say which directory:
 
-    Mirrors core's loader split (``langstage_core/host/loader.py``): only a *file-path*
-    spec — whose module part ends in ``.py`` or contains a path separator — is
-    absolutized; a dotted ``package.module:obj`` spec (and a malformed one core will
-    reject) passes through untouched.
+    - a spec named in a langstage.toml -> that file's directory
+      (``cfg.toml_dir_for("agent_spec")``), so a dotted spec there resolves like the
+      file form does;
+    - anything else (``--agent``, ``LANGSTAGE_AGENT_SPEC``) -> the launch cwd, captured
+      before the chdir, where the user typed it (cli gh #30).
+
+    This replaces the local ``_absolutize_spec_path`` pre-pass, which ran
+    ``os.path.abspath`` before any ``~`` expansion and so turned ``~/a.py:graph`` into
+    ``<cwd>/~/a.py`` (gh #125).
     """
-    module_path, sep, obj_name = spec.rpartition(":")
-    if not sep or not module_path or not obj_name:
-        return spec  # no ':obj' suffix — leave it for core to reject
-    is_file_path = module_path.endswith(".py") or any(s in module_path for s in ("/", "\\"))
-    if not is_file_path:
-        return spec  # dotted module path — cwd-independent, leave it alone
-    return f"{os.path.abspath(module_path)}:{obj_name}"
+    toml_dir = cfg.toml_dir_for("agent_spec") if from_config else None
+    return str(toml_dir) if toml_dir is not None else launch_cwd
 
 
-def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
+def _selfcheck(
+    spec: str,
+    cfg: Any,
+    *,
+    as_json: bool,
+    base_dir: str | None = None,
+    configurable: dict[str, Any] | None = None,
+) -> int:
     """Preflight the spawned interpreter + agent spec, then exit 0/non-zero.
 
     Answers the question the VS Code extension needs before wiring up the chat
@@ -475,9 +473,11 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
             sys.stdout.write(json.dumps(payload) + "\n")
             sys.stdout.flush()
         else:
-            sys.stderr.write(("OK: " if ok else "FAIL: ") + msg + "\n")
+            # The message echoes the user's spec, which may not encode on a cp1252
+            # stderr; write it console-safe like every other human-readable path.
+            safe_write(("OK: " if ok else "FAIL: ") + msg + "\n", sys.stderr)
             if traceback:
-                sys.stderr.write(traceback if traceback.endswith("\n") else traceback + "\n")
+                safe_write(traceback if traceback.endswith("\n") else traceback + "\n", sys.stderr)
         return 0 if ok else 1
 
     # gh #79 + gh #88: enter the workspace as cwd BEFORE importing the agent — and before
@@ -486,15 +486,17 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
     # into the workspace; gh #88 moves the IMPORT there too — the residual — so an agent
     # that does module-level (import-time) relative I/O (loading a prompt/config/data file)
     # loads the same way it will at runtime, instead of false-FAILing from the LAUNCH cwd.
-    # The spec's file path is absolutized against the launch cwd FIRST so a relative
-    # -a ./x.py:graph still loads from where the user pointed (cli gh #30), not from inside
-    # the workspace. ("selfcheck != runtime -> false result" class, cf. the agui path #28.)
-    resolved_spec = _absolutize_spec_path(spec)
+    # A relative spec still resolves from where the user pointed (cli gh #30), not from
+    # inside the workspace: ``base_dir`` is the launch cwd (or the langstage.toml's dir for
+    # a toml-named spec), handed to core's loader — see ``_spec_base_dir``.
+    # ("selfcheck != runtime -> false result" class, cf. the agui path #28.)
     os.chdir(workspace_root())
 
     # 1. The spec must import.
     try:
-        graph = load_agent_spec(resolved_spec)
+        # Import-time prints go to stderr: stdout is the NDJSON protocol / --json /
+        # reply channel on every sidecar path, so a banner there would corrupt it.
+        graph = load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
     except Exception as exc:  # noqa: BLE001 — reported as the verdict
         return verdict(
             False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}"
@@ -517,7 +519,7 @@ def _selfcheck(spec: str, cfg: Any, *, as_json: bool) -> int:
         json.dumps({"type": "shutdown"}),
     ]
     out = io.StringIO()
-    run(graph, iter(commands), out)
+    run(graph, iter(commands), out, configurable=configurable)
     frames = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
     types = [f.get("type") for f in frames]
 
@@ -615,7 +617,7 @@ def _format_interrupt_notice(frame: dict[str, Any], *, repl: bool = False) -> st
 
     ASCII-only on purpose: this is CLI chrome that must survive a cp1252 (strict)
     console/pipe unmangled (the same constraint the em-dash-free ``--help`` and the
-    ``_write_safe`` guard enforce), so no ``U+23F8`` pause glyph. Names the pending
+    ``safe_write`` guard enforce), so no ``U+23F8`` pause glyph. Names the pending
     action(s) and the decisions the frame advertises.
 
     The closing line depends on WHO can answer (gh #63): one-shot ``--message`` has no
@@ -668,7 +670,7 @@ class _OneShotSink:
     An interrupt turn now surfaces a concise notice to STDERR (keeping stdout the clean
     reply channel) and flags ``saw_interrupt`` so ``--message`` can exit with a distinct
     non-zero code; ``--json`` still forwards the raw ``interrupt`` frame verbatim (a
-    consumer keys on ``type == "interrupt"``). Every write goes through ``_write_safe``,
+    consumer keys on ``type == "interrupt"``). Every write goes through ``safe_write``,
     so a non-Latin-1 char in the reply still degrades to an escape on a cp1252 stdout
     instead of crashing (gh #51 holds after the switch to streaming).
     """
@@ -686,6 +688,8 @@ class _OneShotSink:
         self.saw_error = False
         self.saw_interrupt = False
         self.printed_reply = False
+        # The `message_id` of the last content frame rendered (gh #108 boundaries).
+        self._message_id: Any = None
 
     def write(self, s: str) -> None:
         # run()'s emit() writes each frame as a single "<json>\n", but buffer and
@@ -719,19 +723,30 @@ class _OneShotSink:
             # already ASCII-safe), flushing so a piped consumer sees it immediately.
             # The raw `interrupt` frame rides this stream unchanged, so a --json
             # consumer already keys on it (gh #58).
-            _write_safe(self._out, line + "\n")
+            safe_write(line + "\n", self._out)
             self._out.flush()
             return
 
         if ftype == "content":
             text = frame.get("content", "")
+            # gh #108: core (>=1.0.36) stamps every content frame with the `message_id`
+            # of the AIMessage it belongs to, so a change of id is a message boundary
+            # (two nodes' replies, planner -> answer). Render it as a paragraph break so
+            # distinct messages aren't glued into one run-together line. Token chunks of
+            # ONE message share an id, so streaming is unaffected; a frame without the
+            # key (an older core, a test double) never introduces a break.
+            mid = frame.get("message_id")
+            if text and mid is not None:
+                if self._message_id is not None and mid != self._message_id and self.printed_reply:
+                    safe_write("\n\n", self._out)
+                self._message_id = mid
             if text:
-                _write_safe(self._out, text)
+                safe_write(text, self._out)
                 self._out.flush()
                 self.printed_reply = True
         elif ftype == "error":
             # stdout stays the clean reply channel; surface the failure on stderr.
-            _write_safe(self._err, f"error: {frame.get('error', '')}\n")
+            safe_write(f"error: {frame.get('error', '')}\n", self._err)
             # gh #83: under --traceback / LANGSTAGE_DEBUG, core carries the failing turn's
             # Python traceback in the `error` frame — render it to STDERR (never stdout, so
             # a captured reply stays clean) so a developer sees WHERE the agent crashed, not
@@ -740,16 +755,15 @@ class _OneShotSink:
             # traceback already rides that stream; this is the text-mode surfacing.
             tb = frame.get("traceback")
             if tb:
-                _write_safe(self._err, tb if tb.endswith("\n") else tb + "\n")
+                safe_write(tb if tb.endswith("\n") else tb + "\n", self._err)
             self._err.flush()
         elif ftype == "interrupt":
             # gh #58: never render an interrupt turn as blank. Surface a concise
             # notice on stderr (stdout stays the clean reply channel, exactly like the
             # error path) so a paused agent isn't invisible. The full request is on the
             # --json stream for a consumer that needs the payload.
-            _write_safe(
-                self._err,
-                _format_interrupt_notice(frame, repl=self._interrupt_answerable),
+            safe_write(
+                _format_interrupt_notice(frame, repl=self._interrupt_answerable), self._err
             )
             self._err.flush()
 
@@ -758,7 +772,7 @@ class _OneShotSink:
         ``print(reply)`` added, so the shell prompt returns on its own line. No-op in
         ``--json`` mode and when the turn produced no ``content``."""
         if self.printed_reply:
-            _write_safe(self._out, "\n")
+            safe_write("\n", self._out)
             self._out.flush()
 
 
@@ -837,7 +851,7 @@ def _decision_refusal_notice(
     out of context) there is nothing to answer, so say so and point back at plain chat.
 
     The chrome is ASCII-only (same cp1252 rule as the interrupt notice); the echoed
-    input is whatever the user typed, and the ``_write_safe`` writer guards that."""
+    input is whatever the user typed, and the ``safe_write`` writer guards that."""
     lines = [f"not a decision: {text!r} -- {reason}"]
     if pending:
         hint = (
@@ -864,7 +878,7 @@ class _ReplSink(_OneShotSink):
     memory persists (gh #54's invariant). This sink reuses ``_OneShotSink``'s live
     ``content`` rendering, ``error``-to-stderr routing, ``--json`` frame forwarding,
     ``saw_error`` tracking, the gh #58 ``interrupt``-notice-to-stderr surfacing, and
-    cp1252-safe ``_write_safe`` writes verbatim — the ONLY thing it adds is a per-turn
+    cp1252-safe ``safe_write`` writes verbatim — the ONLY thing it adds is a per-turn
     boundary: ``run()`` emits ``turn_end`` after every turn, so on each one (in human
     mode) it closes off the streamed reply with the trailing newline ``_OneShotSink``
     would otherwise add just once, and resets for the next turn. In ``--json`` mode
@@ -916,6 +930,7 @@ class _ReplSink(_OneShotSink):
                 # and reset so the next turn streams onto its own line.
                 self.close_reply()
                 self.printed_reply = False
+                self._message_id = None  # a new turn starts a fresh message sequence
                 return
         # Everything else — content, error, ready/ack/complete, and turn_end in
         # --json mode — is handled exactly as the one-shot sink handles it.
@@ -934,6 +949,7 @@ def _run_repl(
     prompt: str = "> ",
     show_prompt: bool | None = None,
     extractors: Iterable[Any] = (),
+    configurable: dict[str, Any] | None = None,
 ) -> int:
     """Interactive multi-turn REPL: the conversational companion to one-shot
     ``--message`` (gh #56).
@@ -952,7 +968,7 @@ def _run_repl(
     ``{"type": "message", ...}`` command and EOF/``:quit`` becomes ``shutdown``, fed
     lazily to ``run()``; the reply is rendered by ``_ReplSink`` (a ``_OneShotSink``
     that also closes each turn's reply at ``turn_end``). Nothing about the turn,
-    streaming, or ``_write_safe`` plumbing is duplicated. ``--json`` composes with it
+    streaming, or ``safe_write`` plumbing is duplicated. ``--json`` composes with it
     (raw ``event_to_dict`` frames instead of assembled text), same as ``--message``.
 
     **Answering a HITL interrupt inline (gh #63).** When a turn ends on an
@@ -1005,14 +1021,14 @@ def _run_repl(
         """Surface a refused answer line on stderr (stdout stays the reply/NDJSON
         channel, exactly like the error and interrupt notices) and leave any pending
         interrupt pending, so the next line gets another try."""
-        _write_safe(
-            stderr,
+        safe_write(
             _decision_refusal_notice(
                 text,
                 reason,
                 _interrupt_allowed(frame or {}),
                 pending=frame is not None,
             ),
+            stderr,
         )
         stderr.flush()
 
@@ -1030,12 +1046,12 @@ def _run_repl(
             if show_prompt:
                 # A distinct prompt makes the mode switch visible at a TTY, on top of
                 # the notice the interrupt already printed.
-                _write_safe(stderr, ("decision" + prompt) if pending else prompt)
+                safe_write(("decision" + prompt) if pending else prompt, stderr)
                 stderr.flush()
             line = next(lines, None)
             if line is None:  # EOF (Ctrl-D / closed stdin): end the session.
                 if show_prompt:
-                    _write_safe(stderr, "\n")  # move off the dangling prompt line
+                    safe_write("\n", stderr)  # move off the dangling prompt line
                     stderr.flush()
                 yield json.dumps({"type": "shutdown"})
                 return
@@ -1084,7 +1100,7 @@ def _run_repl(
                 {"type": "message", "session_id": session_id, "content": text}
             )
 
-    run(graph, commands(), sink, spec=spec, extractors=extractors)
+    run(graph, commands(), sink, spec=spec, extractors=extractors, configurable=configurable)
 
     # A pre-loop failure (e.g. a non-runnable spec) emits an error before any turn
     # ran, so no turn_end was seen — treat that as a hard start failure (exit 1),
@@ -1107,6 +1123,7 @@ def _run_repl(
 def _run_once(
     graph: Any, message: str, *, spec: str | None, as_json: bool,
     extractors: Iterable[Any] = (),
+    configurable: dict[str, Any] | None = None,
 ) -> int:
     """Drive exactly ONE turn with ``message`` and stream the result, then exit — no
     ``shutdown`` handshake required from the caller (gh #48).
@@ -1134,7 +1151,7 @@ def _run_once(
         json.dumps({"type": "shutdown"}),
     ]
     sink = _OneShotSink(sys.stdout, sys.stderr, as_json=as_json)
-    run(graph, iter(commands), sink, spec=spec, extractors=extractors)
+    run(graph, iter(commands), sink, spec=spec, extractors=extractors, configurable=configurable)
     sink.close_reply()  # human mode: close the streamed reply with a trailing newline
 
     if sink.saw_error:
@@ -1264,6 +1281,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.traceback or cfg.debug:
         os.environ["LANGSTAGE_DEBUG"] = "1"
 
+    # gh #127: the langstage.toml [configurable] table, forwarded to the graph's
+    # config["configurable"] on every turn and rendered by --show-config.
+    configurable = cfg.configurable()
+    # The directory the user launched from, captured BEFORE the workspace chdir below;
+    # core resolves a relative --agent / env spec against it (see _spec_base_dir).
+    launch_cwd = os.getcwd()
+
     if args.show_config:
         # This is a pure stdio sidecar — it never opens a socket or renders a
         # UI, so the inherited host/port/debug/title keys do nothing here.
@@ -1271,6 +1295,13 @@ def main(argv: list[str] | None = None) -> int:
         # (agent_spec, workspace_root) — in BOTH the text and --json forms, from
         # the SAME omit list, so the two agree on which keys show. (gh #14)
         omit_keys = ["host", "port", "debug", "title"]
+        # gh #127: the [configurable] table is forwarded to the graph (below), so the
+        # diagnostic shows it too, through core's own renderer (describe/config_dict take
+        # it as `configurable=`), so every surface prints it the same way.
+        # gh #107 / #110: core's config_dict also reports `toml.paths` (every file read,
+        # the global ~/.langstage/config.toml included) and a present-but-malformed file
+        # as `malformed`/`malformed_files` rather than absent; describe() names it
+        # MALFORMED. The sidecar passes both through unchanged.
         if args.json:
             # gh #71: --show-config is the sidecar's "why isn't my agent loading?"
             # verb — it reports the resolved agent_spec/workspace_root, WHICH layer
@@ -1289,16 +1320,19 @@ def main(argv: list[str] | None = None) -> int:
             # via default=str; the write goes through the shared cp1252-safe writer
             # for consistency with every other stdout write (json.dumps is already
             # ASCII via ensure_ascii, so this can only pass it through).
-            payload = {"type": "show_config", **cfg.config_dict(omit_keys=omit_keys)}
-            _write_safe(sys.stdout, json.dumps(payload, default=str) + "\n")
+            payload = {
+                "type": "show_config",
+                **cfg.config_dict(omit_keys=omit_keys, configurable=configurable),
+            }
+            safe_write(json.dumps(payload, default=str) + "\n", sys.stdout)
             return 0
-        text = cfg.describe(omit_keys=omit_keys)
+        text = cfg.describe(omit_keys=omit_keys, configurable=configurable)
         # A resolved value with a non-Latin-1 char (a CJK/Cyrillic agent spec or
         # project path) made this raw-text print crash with UnicodeEncodeError on the
         # cp1252 (strict) stdout the extension spawns the sidecar on, emitting nothing.
         # Degrade unrepresentable chars to escapes via the shared cp1252-safe writer
         # instead of crashing (gh #42; shared with --message so they can't drift, #51).
-        _write_safe(sys.stdout, text + "\n")
+        safe_write(text + "\n", sys.stdout)
         return 0
 
     def fail(msg: str) -> int:
@@ -1312,7 +1346,7 @@ def main(argv: list[str] | None = None) -> int:
         # protocol loop the extension drives (no --message/--repl) still gets the stdout
         # NDJSON `error` frame — exactly what that consumer wants — and so does --json.
         if (args.message is not None or args.repl) and not args.json:
-            _write_safe(sys.stderr, f"error: {msg}\n")
+            safe_write(f"error: {msg}\n", sys.stderr)
             sys.stderr.flush()
             return 1
         sys.stdout.write(json.dumps({"type": "error", "error": msg}) + "\n")
@@ -1320,12 +1354,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     spec = cfg.agent_spec
+    spec_from_config = True
     if args.demo:
         if args.agent:
             return fail("--demo and --agent are mutually exclusive")
         # args.demo is "echo" (bare --demo, via const) or "tools" — never an
         # invalid value, which argparse rejects up front via choices=.
         spec = DEMO_SPECS[args.demo]
+        spec_from_config = False
 
     # gh #77: the rich-frame demo advertises an `extraction` frame (README/--help/
     # CHANGELOG), which core emits ONLY when a `ToolExtractor` is wired into the turn.
@@ -1346,7 +1382,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.selfcheck:
         # With no agent configured, validate the runtime itself via the demo stub.
-        return _selfcheck(spec or DEMO_AGENT_SPEC, cfg, as_json=args.json)
+        return _selfcheck(
+            spec or DEMO_AGENT_SPEC,
+            cfg,
+            as_json=args.json,
+            base_dir=_spec_base_dir(
+                cfg, launch_cwd=launch_cwd, from_config=spec_from_config and bool(spec)
+            ),
+            configurable=configurable,
+        )
 
     if not spec:
         return fail(
@@ -1364,13 +1408,15 @@ def main(argv: list[str] | None = None) -> int:
     # BEFORE importing the agent (was: AFTER load_agent_spec), so an agent that does
     # module-level (import-time) relative I/O is imported the same way the extension spawns
     # the sidecar — cwd == workspace — not from the launch cwd. A relative -a ./x.py:graph
-    # is absolutized against the launch cwd first (cf. cli gh #30), so it still loads from
-    # where the user pointed; and a bring-your-own agent's raw relative file writes at both
-    # import time and turn time land in the workspace. Single-process, single-agent.
-    resolved_spec = _absolutize_spec_path(spec)
+    # still loads from where the user pointed (cf. cli gh #30): core resolves it against
+    # base_dir (see _spec_base_dir); and a bring-your-own agent's raw relative file writes
+    # at both import time and turn time land in the workspace. Single-process, single-agent.
+    base_dir = _spec_base_dir(cfg, launch_cwd=launch_cwd, from_config=spec_from_config)
     os.chdir(workspace_root())
     try:
-        graph = load_agent_spec(resolved_spec)
+        # Import-time prints go to stderr: stdout is the NDJSON protocol / --json /
+        # reply channel on every sidecar path, so a banner there would corrupt it.
+        graph = load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
     except Exception as exc:  # noqa: BLE001
         msg = f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}"
         # gh #78: a load failure honors the same front-door contract as every other
@@ -1383,19 +1429,28 @@ def main(argv: list[str] | None = None) -> int:
     # One-shot: drive a single turn and print the reply, then exit — no interactive
     # command loop, no caller-crafted NDJSON + shutdown line (gh #48).
     if args.message is not None:
-        return _run_once(graph, args.message, spec=spec, as_json=args.json, extractors=extractors)
+        return _run_once(
+            graph, args.message, spec=spec, as_json=args.json, extractors=extractors,
+            configurable=configurable,
+        )
 
     # Interactive multi-turn: read a prompt per line and drive turns over ONE
     # long-lived session so a checkpointer-backed agent remembers prior turns —
     # the conversational companion to --message (gh #56).
     if args.repl:
-        return _run_repl(graph, spec=spec, as_json=args.json, extractors=extractors)
+        return _run_repl(
+            graph, spec=spec, as_json=args.json, extractors=extractors,
+            configurable=configurable,
+        )
 
     # The raw stdio command loop (what the VS Code extension drives). enable_cancel
     # spins up the background reader so a `cancel` command can stop an in-flight turn
     # cooperatively — keeping the long-lived session and its in-process checkpointer —
     # instead of the extension having to kill the whole sidecar (gh #67).
-    run(graph, sys.stdin, sys.stdout, spec=spec, enable_cancel=True, extractors=extractors)
+    run(
+        graph, sys.stdin, sys.stdout, spec=spec, enable_cancel=True, extractors=extractors,
+        configurable=configurable,
+    )
     return 0
 
 
