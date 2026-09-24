@@ -221,6 +221,30 @@ function spawnSidecar(
     return sc;
   }
 
+  // gh #131: a startup failure (no agent spec, a spec that fails to load, an unusable
+  // workspace) is reported as an `error` frame BEFORE `ready`, and then the sidecar
+  // exits. No turn is listening yet (`onEvent` is set only once `ready` resolves), so
+  // that frame used to be dropped and the chat showed a bare "sidecar exited before it
+  // was ready". Keep it, plus the tail of stderr for failures that happen before the
+  // sidecar can write a frame at all (e.g. the interpreter lacks langstage-vscode).
+  let startupError: string | undefined;
+  let stderrTail = '';
+  proc.stderr?.on('data', (chunk: Buffer | string) => {
+    // Reading stderr also keeps a chatty agent from filling the pipe and blocking.
+    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+  });
+  const rejectNotReady = (code: number | null) => {
+    settleReady(() => {
+      if (startupError) {
+        readyReject(new Error(startupError));
+        return;
+      }
+      const lastLine = stderrTail.trim().split(/\r?\n/).pop()?.trim();
+      const detail = lastLine ? `: ${lastLine}` : code !== null ? ` (exit code ${code})` : '';
+      readyReject(new Error(`sidecar exited before it was ready${detail}`));
+    });
+  };
+
   sc.rl.on('line', (line: string) => {
     const text = line.trim();
     if (!text) return;
@@ -237,6 +261,10 @@ function spawnSidecar(
       settleReady(readyResolve);
       return;
     }
+    if (!settled && event.type === 'error' && startupError === undefined) {
+      startupError = String(event.error ?? 'unknown error');
+      return;
+    }
     sc.onEvent?.(event);
   });
 
@@ -244,9 +272,12 @@ function spawnSidecar(
     sc.alive = false;
     settleReady(() => readyReject(err));
   });
-  proc.on('exit', () => {
+  // `close` fires after stdout has been fully read, so a pre-`ready` error frame has
+  // been seen by then. `exit` can come first; give `close` a moment before settling.
+  proc.on('close', (code: number | null) => rejectNotReady(code));
+  proc.on('exit', (code: number | null) => {
     sc.alive = false;
-    settleReady(() => readyReject(new Error('sidecar exited before it was ready')));
+    setTimeout(() => rejectNotReady(code), 500);
     // Drop it if it is still the active sidecar, so the next turn respawns.
     if (sidecar === sc) {
       sidecar = null;
@@ -401,14 +432,21 @@ function dispatch(
       // (sending {"type":"decision",...} back to the sidecar) is the next
       // increment — it needs a confirmation affordance in the chat UI.
       const actions = (event.action_requests as Array<Record<string, unknown>>) ?? [];
-      // The runtime emits the standard HumanInterrupt action_request shape —
-      // {"action": <tool>, "args": {...}} — so read `.action`. Fall back to `.tool`
-      // for a keyed-dict interrupt, then to a generic label (gh #44).
+      // Two shapes reach the wire, as the sidecar's `_interrupt_actions` documents:
+      // a HumanInterrupt LIST is unwrapped to {"action": <tool>, "args": {...}}
+      // (gh #44), while a single `interrupt({...})` object keeps the request nested
+      // as {"action_request": {"action": <tool>, ...}, "description": ...} (gh #101).
+      // Read the nested one first, then `.action`, then `.tool` for a keyed-dict
+      // interrupt, then a generic label.
       const first = actions[0] ?? {};
-      const tool = first.action ?? first.tool ?? 'an action';
+      const nested = first.action_request;
+      const inner =
+        nested && typeof nested === 'object' ? (nested as Record<string, unknown>) : undefined;
+      const tool = inner?.action ?? first.action ?? first.tool ?? 'an action';
       stream.markdown(
         `\n\n⚠️ The agent wants to run **${String(tool)}** and is waiting for ` +
-          'approval. Interactive approval is not wired up yet in this build.\n',
+          'approval. Interactive approval is not wired up yet in this build, and this ' +
+          'conversation stays paused until it is answered: start a new chat to continue.\n',
       );
       break;
     }
