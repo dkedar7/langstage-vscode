@@ -138,6 +138,11 @@ langstage-vscode-sidecar --selfcheck                       # validate the runtim
 langstage-vscode-sidecar --selfcheck --agent ./my.py:graph # validate the configured agent
 ```
 
+With no agent configured, a pass says it only validated the runtime with the demo stub
+(`"demo_fallback": true` in `--json`). If a `langstage.toml` key that looks like a typo'd
+spec was ignored (`[agent] specc = ...`, an `[agents]` table), `--selfcheck` fails and
+names the key rather than validating the stub in your agent's place.
+
 `--selfcheck` answers "is the runtime healthy?"; **`--message`** answers "what does my
 agent actually *say*?" — it drives one turn with your prompt and prints the reply, then
 exits (no NDJSON + `shutdown` to hand-craft). Add `--json` to get the raw event frames
@@ -326,7 +331,23 @@ with no turn in flight for the session is answered with an `error` frame
 > a malformed `decision`, or a `decision` with no pending interrupt emits
 > `error → turn_end` — **no `ack`**, since nothing ran — so a client that waits for
 > `turn_end` always stops waiting (gh #118). `turn_end` is the one frame every
-> `message`/`decision` is guaranteed to end with.
+> `message`/`decision` is guaranteed to end with. The same `error → turn_end` shape
+> answers a `message` whose `content` isn't a string (gh #113), and a `message` sent to
+> a session that is **paused on an interrupt** (gh #134): a new message would not
+> resume it (the turn would just re-interrupt and the message would never reach the
+> agent), so answer the interrupt with a `decision` instead. A `message`/`decision`
+> whose `session_id` isn't a string is rejected the same way, but its `turn_end`
+> carries **no** `session_id` (the bad value is not echoed back); a `cancel` with a
+> non-string `session_id` gets a bare `error` (gh #122).
+>
+> **Encoding.** Commands are read as **UTF-8**, whatever the platform's locale
+> encoding (gh #119). A line that isn't valid UTF-8 gets a bare `error` frame, like
+> invalid JSON, and the loop keeps serving.
+>
+> **Startup failures** come *before* `ready`: with no agent spec, a spec that fails to
+> load, or a workspace root that isn't a directory (gh #121), the sidecar writes one
+> `error` frame with **no** `ready` and exits `1`. A client should show that frame's
+> `error` text; the extension does (gh #131).
 >
 > Two more terminal shapes are *not* `complete`. An **interrupt** turn emits
 > `interrupt → complete → turn_end`: it *does* still emit `complete`, but the agent

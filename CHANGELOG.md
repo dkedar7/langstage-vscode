@@ -2,6 +2,70 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.29] - 2026-09-24
+
+_Also ships VS Code extension 0.3.4 (`extension/package.json` 0.3.3 -> 0.3.4)._
+
+Wave 3: surface-local correctness. Every fix has a regression test built from its issue's
+repro (`tests/test_wave3_local_correctness.py`).
+
+### Fixed
+- **Non-ASCII chat input reaches the agent intact on Windows (gh #119, #136).** The sidecar
+  decoded incoming commands with the pipe's locale encoding (cp1252 on Western Windows), so
+  `café 世界 🚀` reached the agent as `cafÃ© ä¸–ç•Œ ðŸš€`. A character with a byte cp1252 leaves
+  undefined (`🍁` and much of the emoji block) crashed the stdin reader thread and the whole
+  sidecar, with no `error` or `turn_end`. The raw stdio loop now reads the binary stdin and
+  decodes each line as UTF-8. A line that isn't UTF-8 gets an `error` frame and the loop keeps
+  serving, and a failure reading stdin is reported as a frame, never a silent exit.
+- **A `message` with a non-string `content` gets a one-line `error` (gh #113).** `content: 123`
+  or `true` returned a multi-line Pydantic `ValidationError` naming AG-UI's internal content
+  types. It is now `message 'content' must be a string`, as `error → turn_end` with no `ack`
+  (the gh #118 rule for rejected commands). List content (AG-UI's multimodal shape) still
+  passes through.
+- **A non-string `session_id` gets a one-line `error` (gh #122).** On a `message`, `null` or
+  `99` returned a raw `RunAgentInput`/`thread_id` error and was echoed back in `turn_end`; on a
+  `decision`, an unhashable id (a list) crashed the command loop. `message`, `decision` and
+  `cancel` now reject it (`<command> 'session_id' must be a string`). The rejected
+  `message`/`decision` still ends with `turn_end`, which carries no `session_id`.
+- **A `message` sent while its session is paused on an interrupt is refused, not silently
+  swallowed (gh #134).** It was acked, re-drove the turn (which just re-interrupted), and never
+  reached the agent. It is now `error → turn_end` telling you to answer with a `decision`; the
+  interrupt stays pending, so a `decision` still resumes it. Other sessions are unaffected.
+  The extension can't send a `decision` yet, so its interrupt card now says the conversation
+  stays paused and to start a new chat to continue.
+- **A workspace root that is an existing file is a clean config error (gh #121).** It raised
+  an uncaught `FileExistsError`: a traceback and a dead sidecar before `ready`, and a crashed
+  `--selfcheck --json`. It is now `workspace root '…' is not a directory`: an `error` frame on
+  the stdio loop, `error:` on stderr for `--message`/`--repl`, a FAIL verdict for `--selfcheck`.
+  A missing root is still created, as before.
+- **`--selfcheck` no longer reports healthy by validating the demo stub in place of a
+  misconfigured agent (gh #124).** With `[agent] specc = ...` (or an `[agents]` table) no spec
+  resolved, so the preflight fell back to the stub and said OK / `"ok": true`. It now FAILs and
+  names the key. With no config at all it still passes, but says it only validated the runtime
+  with the demo stub, and `--json` adds `"demo_fallback": true`.
+- **The console-script preflight finds a dotted spec in the workspace (gh #116).**
+  `langstage-vscode-sidecar --selfcheck --agent my_agent:graph --workspace <ws>` launched from
+  outside `<ws>` false-FAILed with `ModuleNotFoundError`, although the extension (`python -m`,
+  cwd = workspace) loads it. When core can't find a dotted spec's package from the launch
+  directory, the sidecar retries core's loader with the workspace as `base_dir`. Core's guard
+  still applies, so a missing dependency inside the agent is never masked. (Launching from the
+  workspace itself already worked since 0.5.28.)
+- **Extension: a startup failure shows the sidecar's own message, not "sidecar exited before it
+  was ready" (gh #131).** The sidecar reports a missing spec, a spec that fails to load, or a bad
+  workspace as an `error` frame before `ready`; the extension dropped it because no turn was
+  listening yet. It now keeps that frame and shows its text. If the sidecar dies before writing
+  any frame (say, the interpreter lacks `langstage-vscode`), it shows the last line of stderr.
+  The extension also reads the sidecar's stderr now, so a chatty agent can't fill that pipe and
+  block.
+- **Extension: the interrupt card names the action for a single-object `interrupt({...})` (gh
+  #101).** Core keeps that request nested (`{"action_request": {"action": ...}}`), and the card
+  read only the top-level `action`, so it said "an action". It now reads both shapes, like the
+  sidecar's `--message`/`--repl` notice.
+
+### Changed
+- **Protocol: the README documents the new `error → turn_end` rejections, UTF-8 input, and the
+  pre-`ready` startup `error` frame.** `--selfcheck --json` gains `demo_fallback` (additive).
+
 ## [0.5.28] - 2026-09-24
 
 _Also ships VS Code extension 0.3.3 (`extension/package.json` 0.3.2 -> 0.3.3)._

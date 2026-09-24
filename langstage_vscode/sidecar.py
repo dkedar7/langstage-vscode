@@ -44,6 +44,34 @@ DEFAULT_MAX_RESULT_LEN = 50_000
 _EOF = object()
 
 
+class _Undecodable:
+    """A command line whose bytes are not valid UTF-8 (gh #119/#136).
+
+    Returned by the command intake in place of the line so the loop can answer it
+    with an ``error`` frame, like invalid JSON, instead of the reader thread dying
+    on a ``UnicodeDecodeError`` and taking the whole sidecar with it."""
+
+    def __init__(self, exc: UnicodeDecodeError) -> None:
+        self.error = f"command is not valid UTF-8: {exc}"
+
+
+def _decode_line(raw: Any) -> Any:
+    """Decode one raw command line as UTF-8 (gh #119).
+
+    The protocol is newline-delimited JSON, which is UTF-8, and the extension writes
+    UTF-8 bytes (``JSON.stringify`` leaves non-ASCII characters literal). ``main()``
+    therefore hands ``run()`` the BINARY stdin and decodes here, so the pipe's locale
+    encoding (cp1252 on Western Windows) never touches the wire: it used to turn
+    ``café`` into ``cafÃ©`` and crash outright on a byte cp1252 leaves undefined.
+    ``str`` lines (every in-process caller) pass through unchanged."""
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return _Undecodable(exc)
+    return raw
+
+
 def _runnable_graph_error(graph: Any, spec: str | None = None) -> str | None:
     """Return an actionable message if ``graph`` isn't a runnable CompiledGraph, else None.
 
@@ -59,6 +87,14 @@ def _runnable_graph_error(graph: Any, spec: str | None = None) -> str | None:
         f"{label}loaded a `{type(graph).__name__}`, not a runnable graph "
         "(no `.stream`). Point the spec at the compiled graph attribute, e.g. `module:graph`."
     )
+
+
+class _ReadFailure:
+    """The input stream itself failed (not one bad line): reported as an ``error``
+    frame, after which the intake reaches EOF and the loop ends."""
+
+    def __init__(self, error: str) -> None:
+        self.error = error
 
 
 class _CommandIntake:
@@ -84,7 +120,7 @@ class _CommandIntake:
         self._enabled = enabled
         self._deferred: deque[Any] = deque()
         if not enabled:
-            self._it = iter(stdin)
+            self._it = (_decode_line(raw) for raw in stdin)
             return
         import queue
         import threading
@@ -94,7 +130,11 @@ class _CommandIntake:
         def _pump() -> None:
             try:
                 for raw in stdin:
-                    self._queue.put(raw)
+                    self._queue.put(_decode_line(raw))
+            except Exception as exc:  # noqa: BLE001 — a read failure must not be silent
+                # gh #136: an exception here used to kill the thread (and, with it, the
+                # process) with no frame at all. Report it; the EOF below ends the loop.
+                self._queue.put(_ReadFailure(f"reading stdin failed: {type(exc).__name__}: {exc}"))
             finally:
                 self._queue.put(_EOF)  # unblock the loop's blocking get on EOF
 
@@ -161,7 +201,9 @@ def run(
 
     Since langstage-core 1.0 (ADR 0003) turns stream through the in-process AG-UI
     adapter — the only path — emitting ``event_to_dict``-shaped frames so the TS
-    extension is unchanged. ``stdin`` is any line iterable; ``stdout`` needs ``write``.
+    extension is unchanged. ``stdin`` is any line iterable, of ``str`` or of UTF-8
+    ``bytes`` (the raw stdio path passes the binary stdin, gh #119); ``stdout`` needs
+    ``write``.
 
     ``enable_cancel`` (the raw stdio path only) spins up a background reader so a
     ``cancel`` command can stop an in-flight turn cooperatively — the loop is single-
@@ -223,6 +265,9 @@ def run(
         raw = intake.next_command()
         if raw is _EOF:
             break
+        if isinstance(raw, (_Undecodable, _ReadFailure)):
+            emit({"type": "error", "error": raw.error})
+            continue
         line = raw.strip()
         if not line:
             continue
@@ -246,12 +291,31 @@ def run(
             break
 
         session_id = cmd.get("session_id", "default")
+        # gh #122: `session_id` becomes the graph's thread_id. A non-string one (null, a
+        # number) used to reach AG-UI's RunAgentInput and come back as a raw Pydantic
+        # dump naming `thread_id`, and an unhashable one (a list) crashed the pending-
+        # interrupt lookup below. Reject it for every session command. A rejected
+        # message/decision still ends its turn (gh #118), but that `turn_end` carries no
+        # session_id: echoing the bad value back would hand the client a non-string id.
+        if ctype in ("message", "decision", "cancel") and not isinstance(session_id, str):
+            emit({"type": "error", "error": f"{ctype} 'session_id' must be a string"})
+            if ctype != "cancel":  # a cancel never opens a turn
+                emit({"type": "turn_end"})
+            continue
         config = {"configurable": {"thread_id": session_id}}
 
         agui_message: str | None = None
         agui_resume: Any = None
         if ctype == "message":
             content = cmd.get("content", "")
+            # gh #113: a non-string `content` (a number, a bool, an object) slipped past
+            # the empty check and reached AG-UI's UserMessage model, which answered with
+            # a multi-line ValidationError naming internal content-part types. A list is
+            # passed through as before: it is AG-UI's multimodal content shape.
+            if content and not isinstance(content, (str, list)):
+                emit({"type": "error", "error": "message 'content' must be a string"})
+                emit({"type": "turn_end", "session_id": session_id})
+                continue
             if not content:
                 emit({"type": "error", "error": "message requires 'content'"})
                 # gh #118: the rejection is still the END of the turn the client
@@ -261,6 +325,18 @@ def run(
                 # that frame. A bare `error` with no `turn_end` leaves the
                 # client's turn pending forever (the stuck-spinner hang). Treat
                 # the rejected message as a zero-length turn: error -> turn_end.
+                emit({"type": "turn_end", "session_id": session_id})
+                continue
+            # gh #134: a message to a session paused on an interrupt doesn't resume it:
+            # the turn just re-interrupts and the message never reaches the agent. It
+            # used to be acked and silently dropped. Refuse it, like the gh #65 guard on
+            # the other side (a decision with nothing pending), and leave the interrupt
+            # pending so a `decision` can still answer it.
+            if session_id in pending_interrupts:
+                emit({"type": "error",
+                      "error": f"session {session_id!r} is paused on a pending interrupt; "
+                               "answer it with a `decision` command (a new message would "
+                               "not reach the agent)"})
                 emit({"type": "turn_end", "session_id": session_id})
                 continue
             emit({"type": "ack", "ref": "message"})
@@ -435,6 +511,68 @@ def _spec_base_dir(cfg: Any, *, launch_cwd: str, from_config: bool) -> str:
     return str(toml_dir) if toml_dir is not None else launch_cwd
 
 
+def _apply_workspace_error(root: Any) -> str | None:
+    """Apply the resolved workspace root; return an actionable message if it can't be.
+
+    Core's ``apply_workspace`` creates a missing root (intended), but a root that is an
+    existing FILE raised an uncaught ``FileExistsError`` out of ``main()``: a traceback,
+    no frame, a dead sidecar before ``ready``, and a crashed ``--selfcheck`` (gh #121).
+    """
+    try:
+        apply_workspace(root)
+    except (FileExistsError, NotADirectoryError):
+        return f"workspace root {str(root)!r} is not a directory"
+    except OSError as exc:
+        return f"workspace root {str(root)!r} is not usable: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _load_spec(spec: str, *, base_dir: str | None) -> Any:
+    """Load ``spec`` through core, with the workspace as a second import root for a
+    dotted spec (gh #116).
+
+    The extension spawns ``python -m langstage_vscode`` with cwd == the workspace, so
+    the workspace is on ``sys.path`` and a workspace-local ``my_agent:graph`` loads in
+    chat. The console script (``--selfcheck`` / ``--message``) has only its ``bin/``
+    directory there, and core's own fallback searches ``base_dir`` (the launch cwd), so
+    a preflight launched from outside the workspace false-FAILed. When core can't find
+    a dotted spec's package from ``base_dir``, retry with the workspace as ``base_dir``:
+    core applies the same guard (only when the spec's own package is missing and exists
+    there), so this can't mask a missing dependency. The first error is the one
+    reported if both fail.
+    """
+    from langstage_core.host.loader import is_file_spec, parse_agent_spec
+
+    try:
+        return load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
+    except ModuleNotFoundError:
+        ws = str(workspace_root())
+        same_dir = base_dir is not None and (
+            os.path.normcase(os.path.abspath(base_dir)) == os.path.normcase(ws)
+        )
+        if same_dir or is_file_spec(parse_agent_spec(spec)[0]):
+            raise
+        try:
+            return load_agent_spec(spec, base_dir=ws, stdout_to_stderr=True)
+        except ModuleNotFoundError:
+            pass
+        raise
+
+
+def _agent_key_typos(cfg: Any) -> list[str]:
+    """Unknown ``langstage.toml`` keys that were probably meant to name the agent:
+    anything under an ``[agent]``/``[agents]`` table, or a ``spec`` key in any table
+    (gh #124)."""
+    try:
+        unknown = cfg.unknown_toml_keys()
+    except Exception:  # noqa: BLE001 - a diagnostic must never break the preflight
+        return []
+    return [
+        k for k in unknown
+        if k.split(".")[0] in ("agent", "agents") or k.split(".")[-1] in ("spec", "agent_spec")
+    ]
+
+
 def _selfcheck(
     spec: str,
     cfg: Any,
@@ -442,8 +580,14 @@ def _selfcheck(
     as_json: bool,
     base_dir: str | None = None,
     configurable: dict[str, Any] | None = None,
+    demo_fallback: bool = False,
 ) -> int:
     """Preflight the spawned interpreter + agent spec, then exit 0/non-zero.
+
+    ``demo_fallback`` means no agent is configured and ``spec`` is the demo stub, so a
+    pass only proves the runtime works. The verdict says so (``--json`` adds
+    ``"demo_fallback": true``), and if a ``langstage.toml`` key that looks like a typo'd
+    agent spec was ignored, it FAILs rather than validating the stub (gh #124).
 
     Answers the question the VS Code extension needs before wiring up the chat
     participant: does this interpreter have a working sidecar, and does the
@@ -456,11 +600,6 @@ def _selfcheck(
 
     from langstage_vscode import __version__
 
-    # Publish the resolved workspace to the agent's env (canonical + legacy names).
-    # The cwd half of "same as the real run path" — os.chdir(workspace_root()) — is done
-    # below, AFTER the spec resolves, exactly like run() (gh #79).
-    apply_workspace(cfg.workspace_root)
-
     def verdict(ok: bool, msg: str, traceback: str | None = None) -> int:
         # gh #83: when --traceback / LANGSTAGE_DEBUG is on and the preflight turn errored,
         # core carries the crash's Python traceback in the error frame; thread it into the
@@ -468,6 +607,8 @@ def _selfcheck(
         # log it) and printed under the FAIL line in text mode. Absent otherwise.
         if as_json:
             payload = {"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}
+            if demo_fallback:
+                payload["demo_fallback"] = True
             if traceback:
                 payload["traceback"] = traceback
             sys.stdout.write(json.dumps(payload) + "\n")
@@ -479,6 +620,27 @@ def _selfcheck(
             if traceback:
                 safe_write(traceback if traceback.endswith("\n") else traceback + "\n", sys.stderr)
         return 0 if ok else 1
+
+    # gh #124: no agent resolved, but the toml has a key that looks like a typo'd spec
+    # (`[agent] specc`, an `[agents]` table). Validating the stub here would green-light
+    # the very misconfiguration `--show-config` flags, so FAIL and name the key.
+    if demo_fallback:
+        typos = _agent_key_typos(cfg)
+        if typos:
+            return verdict(
+                False,
+                "no agent spec resolved, and langstage.toml has unknown keys that look like "
+                f"one: {', '.join(typos)} (expected `[agent]` + `spec = ...`). Not validating "
+                "the demo stub in its place; pass --demo to check the runtime alone.",
+            )
+
+    # Publish the resolved workspace to the agent's env (canonical + legacy names).
+    # The cwd half of "same as the real run path" — os.chdir(workspace_root()) — is done
+    # below, AFTER the spec resolves, exactly like run() (gh #79). An unusable root (a
+    # file) is a FAIL verdict, not a traceback (gh #121).
+    ws_error = _apply_workspace_error(cfg.workspace_root)
+    if ws_error is not None:
+        return verdict(False, ws_error)
 
     # gh #79 + gh #88: enter the workspace as cwd BEFORE importing the agent — and before
     # driving the preflight turn — so the whole preflight is faithful to the real run path,
@@ -496,7 +658,7 @@ def _selfcheck(
     try:
         # Import-time prints go to stderr: stdout is the NDJSON protocol / --json /
         # reply channel on every sidecar path, so a banner there would corrupt it.
-        graph = load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
+        graph = _load_spec(spec, base_dir=base_dir)
     except Exception as exc:  # noqa: BLE001 — reported as the verdict
         return verdict(
             False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}"
@@ -536,10 +698,12 @@ def _selfcheck(
             False, f"agent spec {spec!r} did not complete a turn (frames: {types})"
         )
 
-    return verdict(
-        True,
-        f"langstage-vscode {__version__} - {spec} drove a turn; interpreter has a working sidecar.",
+    ok_msg = (
+        f"langstage-vscode {__version__} - {spec} drove a turn; interpreter has a working sidecar."
     )
+    if demo_fallback:
+        ok_msg += " (no agent configured: validated the runtime with the demo stub only)"
+    return verdict(True, ok_msg)
 
 
 def _interrupt_actions(frame: dict[str, Any]) -> list[str]:
@@ -1390,6 +1554,7 @@ def main(argv: list[str] | None = None) -> int:
                 cfg, launch_cwd=launch_cwd, from_config=spec_from_config and bool(spec)
             ),
             configurable=configurable,
+            demo_fallback=not spec,
         )
 
     if not spec:
@@ -1402,8 +1567,11 @@ def main(argv: list[str] | None = None) -> int:
     # (ADR 0005). cfg.workspace_root already applied precedence (CLI --workspace >
     # env > toml), so it is authoritative; apply_workspace publishes it to the env
     # the agent reads (canonical + legacy names) and records it as the active
-    # workspace for workspace_root(). Replaces the manual env-assign (gh #19).
-    apply_workspace(cfg.workspace_root)
+    # workspace for workspace_root(). Replaces the manual env-assign (gh #19). A root
+    # that can't be a directory is a clean config error through fail() (gh #121).
+    ws_error = _apply_workspace_error(cfg.workspace_root)
+    if ws_error is not None:
+        return fail(ws_error)
     # Operate the agent from the workspace as cwd (ADR 0006). gh #88: enter the workspace
     # BEFORE importing the agent (was: AFTER load_agent_spec), so an agent that does
     # module-level (import-time) relative I/O is imported the same way the extension spawns
@@ -1416,7 +1584,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Import-time prints go to stderr: stdout is the NDJSON protocol / --json /
         # reply channel on every sidecar path, so a banner there would corrupt it.
-        graph = load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
+        graph = _load_spec(spec, base_dir=base_dir)
     except Exception as exc:  # noqa: BLE001
         msg = f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}"
         # gh #78: a load failure honors the same front-door contract as every other
@@ -1447,9 +1615,15 @@ def main(argv: list[str] | None = None) -> int:
     # spins up the background reader so a `cancel` command can stop an in-flight turn
     # cooperatively — keeping the long-lived session and its in-process checkpointer —
     # instead of the extension having to kill the whole sidecar (gh #67).
+    #
+    # gh #119/#136: read the BINARY stdin and decode each line as UTF-8 in the intake.
+    # The text stdin decodes with the pipe's locale encoding (cp1252 on Western
+    # Windows), which turned non-ASCII input into mojibake and crashed the reader on a
+    # byte cp1252 leaves undefined. A stream without `.buffer` (a test double) is used
+    # as-is.
     run(
-        graph, sys.stdin, sys.stdout, spec=spec, enable_cancel=True, extractors=extractors,
-        configurable=configurable,
+        graph, getattr(sys.stdin, "buffer", sys.stdin), sys.stdout, spec=spec,
+        enable_cancel=True, extractors=extractors, configurable=configurable,
     )
     return 0
 
