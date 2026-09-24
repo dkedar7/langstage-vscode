@@ -311,8 +311,9 @@ function runTurn(
           settle();
         }
 
+        const turn: TurnRenderState = { lastMessageId: undefined };
         sc.onEvent = (event: AgentEvent) => {
-          dispatch(event, stream);
+          dispatch(event, stream, turn);
           if (event.type === 'turn_end') {
             finish(resolve);
           }
@@ -344,12 +345,36 @@ function disposeSidecar(): void {
   }
 }
 
+/** Per-turn rendering state carried between `dispatch` calls. */
+interface TurnRenderState {
+  /** `message_id` of the last `content` frame rendered in this turn (gh #108). */
+  lastMessageId: string | undefined;
+}
+
 /** Map one sidecar event onto the chat response stream. */
-function dispatch(event: AgentEvent, stream: vscode.ChatResponseStream): void {
+function dispatch(
+  event: AgentEvent,
+  stream: vscode.ChatResponseStream,
+  turn: TurnRenderState,
+): void {
   switch (event.type) {
-    case 'content':
-      stream.markdown(String(event.content ?? ''));
+    case 'content': {
+      // gh #108: every `content` frame carries the `message_id` of the AIMessage it
+      // belongs to (langstage-core >= 1.0.36). When it changes, a new assistant
+      // message starts (e.g. a planner node, then an answer node), so open a new
+      // paragraph instead of gluing the two replies into one line. Token chunks of
+      // one message share an id; a frame without one never adds a break.
+      const text = String(event.content ?? '');
+      const messageId = typeof event.message_id === 'string' ? event.message_id : undefined;
+      if (text && messageId !== undefined) {
+        if (turn.lastMessageId !== undefined && messageId !== turn.lastMessageId) {
+          stream.markdown('\n\n');
+        }
+        turn.lastMessageId = messageId;
+      }
+      stream.markdown(text);
       break;
+    }
     case 'reasoning':
       stream.markdown(`\n\n*${String(event.content ?? '')}*\n\n`);
       break;

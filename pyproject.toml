@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.5.27"
+version = "0.5.28"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 readme = "README.md"
 license = "MIT"
@@ -30,7 +30,17 @@ dependencies = [
     # (a typo'd langstage.toml key now shows in `--show-config` / config_dict().toml.unknown_keys,
     # gh #82) and the terminal `error` frame's `traceback` field under LANGSTAGE_DEBUG, which
     # `--traceback` renders so a crash shows WHERE, not just its type + message (gh #83).
-    "langstage-core[agui]>=1.0.32",
+    # >=1.0.36 (Wave 2) carries the root-cause fixes this release adopts and the APIs it
+    # now calls instead of local copies: spec loading strips whitespace (gh #135),
+    # expands `~` (gh #125), rebases a relative TOML spec / workspace root onto the TOML's
+    # directory (gh #123, #126) and takes `load_agent_spec(..., base_dir=)`;
+    # HostConfig.configurable() (gh #127) and config_dict()'s toml.paths / malformed
+    # reporting (gh #107, #110); langstage_core.console.safe_write; one legacy-env notice
+    # instead of two (gh #112); HITL resume on RunAgentInput.resume[] with no adapter
+    # deprecation warning (gh #103) and allowed_decisions read from the interrupt's own
+    # config (gh #114); content frames' `message_id` (gh #108) and content from earlier
+    # nodes kept when a later node errors (gh #105).
+    "langstage-core[agui]>=1.0.36",
 ]
 
 [project.optional-dependencies]

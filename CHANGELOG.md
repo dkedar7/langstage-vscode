@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.28] - 2026-09-24
+
+_Also ships VS Code extension 0.3.3 (`extension/package.json` 0.3.2 -> 0.3.3)._
+
+Requires **langstage-core >=1.0.36** (up from >=1.0.32). Most of the fixes below are core's
+Wave 2 root-cause fixes, which this release adopts. The sidecar now calls core's APIs instead
+of keeping its own copies, and every fix has a regression test on the vscode path, built from
+its issue's repro (`tests/test_core_1036_adoption.py`).
+
+### Fixed
+- **A stray space around the agent spec no longer breaks loading (gh #135).** `"agent.py:graph "`
+  (a copy-paste artifact in `langstage.agentSpec`) failed with `has no attribute 'graph '`.
+  Core now strips the spec.
+- **A leading `~` in the agent spec or workspace root expands to your home directory (gh #125).**
+  It used to be read literally, so the spec failed with `FileNotFoundError` and a
+  `[workspace] root = "~/..."` quietly created a literal `~` directory in the project.
+- **A relative `[agent] spec` or `[workspace] root` in `langstage.toml` resolves against that
+  file's directory, not the cwd (gh #123, #126).** `--selfcheck` / `--message` from a project
+  subdirectory no longer false-FAIL or create a junk workspace directory there. A dotted
+  `pkg.mod:graph` spec in `langstage.toml` also resolves from the file's directory: the sidecar
+  passes `cfg.toml_dir_for("agent_spec")` to core's loader as `base_dir`.
+- **The `[configurable]` table in `langstage.toml` reaches the graph (gh #127).** It was accepted
+  and silently dropped. It is now forwarded as the graph's `config["configurable"]` on every turn
+  (extension, `--message`, `--repl`, `--selfcheck`), and `--show-config` shows it (a
+  `configurable` key in `--json`).
+- **`--show-config` reports a malformed `langstage.toml` as MALFORMED, with the parse error, not
+  as absent (gh #110).** `--json` adds `toml.malformed` and `toml.malformed_files`.
+- **`--show-config --json` lists every config file it read in `toml.paths`, global first (gh
+  #107).** `toml.path` keeps its old meaning (the highest-precedence file).
+- **A legacy `DEEPAGENT_*` env var is announced once, not twice (gh #112).** The raw
+  `DeprecationWarning` pointing at `sys.exit(main())` is gone; the `note:` stays.
+- **An interrupt advertises only the decisions its own config allows (gh #114).** An approve-only
+  `HumanInterrupt` used to advertise all four verbs; `--message` and `--repl` now offer, and
+  `--repl` accepts, only the allowed ones.
+- **Answering an interrupt no longer prints ag-ui-langgraph's
+  `forwardedProps.command.resume is deprecated` warning to stderr (gh #103).**
+- **Separate assistant messages get a paragraph break (gh #108).** Content frames now carry
+  `message_id`. When it changes, the extension's chat panel and the `--message` / `--repl` text
+  output start a new paragraph, so two nodes' replies are no longer glued into one line.
+- **Content from an earlier node is kept when a later node errors (gh #105).** The partial reply
+  now streams before the `error` frame, where only the error used to reach the client.
+
+### Changed
+- **Content frames carry `message_id`, and `complete` carries `outcome`** (`"complete"` or
+  `"interrupted"`). Both keys are additive; the README's protocol section documents them.
+- **`--show-config --json` gains `toml.paths`, `toml.malformed`, `toml.malformed_files`,
+  a top-level `issues` list and a `configurable` object.** No existing key changed.
+
+### Removed
+- **`_absolutize_spec_path`**, the sidecar's own spec pre-pass. It ran before `~` expansion. The
+  launch-cwd behavior it provided (a relative `--agent` still loads from where you typed it, even
+  though the sidecar enters the workspace before importing, gh #88) now comes from core's
+  `load_agent_spec(spec, base_dir=<launch cwd>)`.
+- **`_write_safe`**, the sidecar's copy of the cp1252-safe writer. `--message`, `--repl`,
+  `--show-config` and the `--selfcheck` verdict now write through `langstage_core.console.safe_write`.
+
 ## [0.5.27] - 2026-09-23
 
 _Also ships VS Code extension 0.3.2 (`extension/package.json` 0.3.1 -> 0.3.2)._

@@ -41,7 +41,14 @@ def test_text_frames_match_the_wire_shape():
     kinds = [f["type"] for f in frames]
     assert kinds[0] == "ready" and "ack" in kinds and kinds[-1] == "turn_end"
     content = [f for f in frames if f["type"] == "content"]
-    assert content and all(set(f) == {"type", "content", "role", "node"} for f in content)
+    # core >=1.0.36 stamps each content frame with the `message_id` of the AIMessage it
+    # belongs to (gh #108): a change of id is a message boundary. The echo stub streams
+    # ONE message, so every token chunk carries the same non-empty id.
+    assert content and all(
+        set(f) == {"type", "content", "role", "node", "message_id"} for f in content
+    )
+    ids = {f["message_id"] for f in content}
+    assert len(ids) == 1 and all(isinstance(i, str) and i for i in ids)
     assert "hi there" in "".join(f["content"] for f in content)
     assert any(f["type"] == "complete" for f in frames)
 

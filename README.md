@@ -109,6 +109,25 @@ flags** — so a project with `[agent] spec = "my_agent.py:graph"` in its
 langstage-vscode-sidecar --show-config
 ```
 
+A relative path in a `langstage.toml` (`[agent] spec = "agent.py:graph"`, `[workspace] root`)
+resolves against **that file's directory**, so the sidecar behaves the same from any
+subdirectory of the project; a relative `--agent` / `LANGSTAGE_AGENT_SPEC` resolves against the
+directory you launched from. A leading `~` expands everywhere, and stray whitespace around the
+spec is ignored. A `[configurable]` table is forwarded verbatim to your graph's
+`config["configurable"]` on every turn and shown by `--show-config`:
+
+```toml
+[agent]
+spec = "my_agent.py:graph"
+
+[configurable]
+model = "claude-sonnet-4-5"   # read in a node via config["configurable"]["model"]
+```
+
+`--show-config --json` lists every config file it read under `toml.paths` (the global
+`~/.langstage/config.toml` first), and reports a `langstage.toml` that exists but doesn't parse
+as `"malformed": true` with the parse error, rather than as absent.
+
 Preflight the interpreter and your agent before wiring up chat — `--selfcheck`
 (alias `--smoke`) loads the configured agent (or the demo stub), asserts it's a
 runnable graph, drives one turn, and exits `0` (healthy) / non-zero with a precise
@@ -280,11 +299,14 @@ with no turn in flight for the session is answered with an `error` frame
 ```jsonc
 {"type": "ready"}                          // emitted once at startup
 {"type": "ack", "ref": "message"}          // command accepted
-{"type": "content", "content": "..."}      // assistant text
+{"type": "content", "content": "...", "message_id": "..."}  // assistant text
+                                           // a new message_id = a new assistant message
+                                           // (render a paragraph break between them)
 {"type": "tool_start", "name": "...", ...} // tool call
 {"type": "tool_end", "name": "...", ...}   // tool result
 {"type": "interrupt", "action_requests": [...]}  // human-in-the-loop
-{"type": "complete"}                       // turn finished (success) — see the note below
+{"type": "complete", "outcome": "complete"} // turn finished ("interrupted" if it paused
+                                           // on an interrupt) — see the note below
 {"type": "cancelled", "session_id": "s1"}  // turn stopped by a `cancel` (not complete/error)
 {"type": "error", "error": "..."}          // protocol error (bad/unknown command)
                                            // OR an exception raised by the agent.
@@ -297,7 +319,8 @@ with no turn in flight for the session is answered with an `error` frame
 > `content`, an invalid `decision` (including a well-formed one sent when the session
 > has no pending interrupt to resume), **and** an agent crashing mid-turn all emit an
 > `error` frame. On the agent-failure path there is no `complete` — the sequence
-> is `ack → error → turn_end` — so don't key turn-completion off `complete` alone.
+> is `ack → error → turn_end`, with any content earlier nodes already produced
+> streamed before the `error` — so don't key turn-completion off `complete` alone.
 >
 > A **rejected** command is still a (zero-length) turn: a `message` with no `content`,
 > a malformed `decision`, or a `decision` with no pending interrupt emits

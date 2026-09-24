@@ -414,8 +414,22 @@ def test_show_config_json_emits_machine_readable_object(monkeypatch, tmp_path, c
     assert obj["config"]["agent_spec"]["value"] is None
     assert obj["config"]["agent_spec"]["source"] == "default"
     assert obj["config"]["workspace_root"]["value"] == "."
-    # core >=1.0.32 adds `unknown_keys` to the toml block (gh #82); no toml here -> empty.
-    assert obj["toml"] == {"found": False, "path": None, "unknown_keys": []}
+    # The toml block's documented shape (core >=1.0.36): `unknown_keys` (gh #82), plus
+    # `paths` (every file read, global first; gh #107) and `malformed`/`malformed_files`
+    # (a present-but-unparseable file is not "absent"; gh #110). No toml here -> empty.
+    assert obj["toml"] == {
+        "found": False,
+        "path": None,
+        "paths": [],
+        "malformed": False,
+        "malformed_files": [],
+        "unknown_keys": [],
+    }
+    # Top-level `issues` (config_issues(): nothing ignored or degraded) and the
+    # `[configurable]` table the sidecar forwards to the graph (gh #127), empty here.
+    assert obj["issues"] == []
+    assert obj["configurable"] == {}
+    assert set(obj) == {"type", "config", "toml", "issues", "configurable"}
 
 
 def test_show_config_json_matches_config_dict(monkeypatch, tmp_path, capsys):
@@ -1881,21 +1895,6 @@ def test_selfcheck_imports_agent_from_workspace_cwd(monkeypatch, tmp_path, capsy
     agent = _import_probe_agent(tmp_path)
     rc = main(["--selfcheck", "--agent", f"{agent}:graph", "--workspace", str(ws)])
     assert rc == 0, capsys.readouterr().err  # was a false FAIL: FileNotFoundError at import
-
-
-def test_absolutize_spec_path_leaves_dotted_and_bare_specs_untouched():
-    # gh #88 unit: only a FILE-PATH spec is absolutized (so a later chdir can't move it);
-    # a dotted module spec and a suffix-less spec pass through unchanged (core handles them).
-    import os
-
-    from langstage_vscode.sidecar import _absolutize_spec_path
-
-    assert _absolutize_spec_path("langstage_core.demo.stub:graph") == "langstage_core.demo.stub:graph"
-    assert _absolutize_spec_path("no_colon_here") == "no_colon_here"
-    # A relative file-path spec becomes absolute against the CURRENT cwd, obj name preserved.
-    out = _absolutize_spec_path("./agent.py:graph")
-    assert out == f"{os.path.abspath('./agent.py')}:graph"
-    assert os.path.isabs(out.rpartition(":")[0])
 
 
 # ── gh #80: a valid-JSON non-object line errors gracefully (no crash) ──
