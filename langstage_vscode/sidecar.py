@@ -494,7 +494,9 @@ def _selfcheck(
 
     # 1. The spec must import.
     try:
-        graph = load_agent_spec(spec, base_dir=base_dir)
+        # Import-time prints go to stderr: stdout is the NDJSON protocol / --json /
+        # reply channel on every sidecar path, so a banner there would corrupt it.
+        graph = load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
     except Exception as exc:  # noqa: BLE001 — reported as the verdict
         return verdict(
             False, f"agent spec {spec!r} failed to load: {type(exc).__name__}: {exc}"
@@ -1412,7 +1414,9 @@ def main(argv: list[str] | None = None) -> int:
     base_dir = _spec_base_dir(cfg, launch_cwd=launch_cwd, from_config=spec_from_config)
     os.chdir(workspace_root())
     try:
-        graph = load_agent_spec(spec, base_dir=base_dir)
+        # Import-time prints go to stderr: stdout is the NDJSON protocol / --json /
+        # reply channel on every sidecar path, so a banner there would corrupt it.
+        graph = load_agent_spec(spec, base_dir=base_dir, stdout_to_stderr=True)
     except Exception as exc:  # noqa: BLE001
         msg = f"failed to load agent {spec!r}: {type(exc).__name__}: {exc}"
         # gh #78: a load failure honors the same front-door contract as every other

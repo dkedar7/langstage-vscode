@@ -43,6 +43,11 @@ its issue's repro (`tests/test_core_1036_adoption.py`).
   output start a new paragraph, so two nodes' replies are no longer glued into one line.
 - **Content from an earlier node is kept when a later node errors (gh #105).** The partial reply
   now streams before the `error` frame, where only the error used to reach the client.
+- **An agent that prints at import no longer corrupts stdout.** An import-time `print` (a
+  banner or a debug line) went to stdout, which is the NDJSON protocol channel. That broke the
+  extension's frame stream and `--json`, and polluted the `--message` reply. The sidecar now
+  loads the agent with core's `load_agent_spec(..., stdout_to_stderr=True)` on every path (the
+  stdio protocol, `--message`, `--repl`, `--selfcheck`, `--json`), so those prints go to stderr.
 
 ### Changed
 - **Content frames carry `message_id`, and `complete` carries `outcome`** (`"complete"` or

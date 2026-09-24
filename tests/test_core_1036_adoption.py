@@ -489,3 +489,36 @@ def test_local_write_safe_helper_is_gone():
 
     assert not hasattr(sc, "_write_safe")
     assert not hasattr(sc, "_absolutize_spec_path")
+
+
+# ── an agent's import-time print never lands on stdout (core stdout_to_stderr) ──
+
+_NOISY_SRC = "print('BANNER at import')\n" + _AGENT_SRC % "noisy ok"
+
+
+@pytest.mark.parametrize(
+    "args, stdin",
+    [
+        (["--message", "hi", "--json"], None),
+        (["--message", "hi"], None),
+        (["--repl", "--json"], "hi\n:quit\n"),
+        (["--selfcheck", "--json"], None),
+        ([], '{"type": "message", "session_id": "s", "content": "hi"}\n{"type": "shutdown"}\n'),
+    ],
+    ids=["message-json", "message-text", "repl-json", "selfcheck-json", "stdio-protocol"],
+)
+def test_import_time_print_goes_to_stderr_not_the_stdout_channel(tmp_path, args, stdin):
+    (tmp_path / "noisy.py").write_text(_NOISY_SRC, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LANGSTAGE_", "DEEPAGENT"))}
+    env["LANGSTAGE_CONFIG_HOME"] = str(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, "-m", "langstage_vscode", "--agent", "noisy.py:graph", *args],
+        input=stdin or "", capture_output=True, text=True, env=env, cwd=tmp_path, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "BANNER" not in proc.stdout
+    assert "BANNER at import" in proc.stderr  # not swallowed, just moved
+    if args == ["--message", "hi"]:
+        assert proc.stdout == "noisy ok\n"
+    else:
+        _frames(proc.stdout)  # every stdout line is a JSON frame
