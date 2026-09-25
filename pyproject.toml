@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.5.30"
+version = "0.5.31"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 readme = "README.md"
 license = "MIT"
@@ -40,7 +40,9 @@ dependencies = [
     # deprecation warning (gh #103) and allowed_decisions read from the interrupt's own
     # config (gh #114); content frames' `message_id` (gh #108) and content from earlier
     # nodes kept when a later node errors (gh #105).
-    "langstage-core[agui]>=1.0.36",
+    # >=1.0.37 for normalize_decision (decision verbs + the accept/ignore/response
+    # aliases), which both decision drivers validate against (gh #117, #114).
+    "langstage-core[agui]>=1.0.37",
 ]
 
 [project.optional-dependencies]

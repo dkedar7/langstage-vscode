@@ -231,7 +231,7 @@ resumed with: {'decisions': [{'type': 'approve'}]}
   a bare verb is only read as a decision *while an interrupt is pending*; the rest of the time
   `approve` is ordinary chat text.
 - The verbs come from **that interrupt's own `allowed_decisions`**, so an approval-only agent
-  offers and accepts exactly `reject | approve`. Payloads follow the LangChain HITL decisions:
+  offers and accepts exactly `reject | approve` (the legacy aliases below are accepted too). Payloads follow the LangChain HITL decisions:
   `approve`, `reject [<text>]`, `respond <text>`, `edit <json>` (free text becomes `message`, a
   JSON object is merged in, e.g. `edit {"edited_action": {"name": "confirm", "args": {}}}`).
 - While an interrupt is pending, a line that **isn't** a valid decision is **refused on stderr and
@@ -294,6 +294,27 @@ python -m langstage_vscode --demo=tools
 {"type": "shutdown"}
 ```
 
+**Decision verbs.** Each entry in `decisions` needs a string `type`, and that verb must
+be one the pending `interrupt` frame lists in `allowed_decisions`. The advertised verbs
+are LangChain's HITL decisions: `approve`, `edit`, `reject`, `respond`. The legacy
+LangGraph `HumanResponse` verbs are accepted as aliases, in any case:
+
+| Alias      | Means     |
+|------------|-----------|
+| `accept`   | `approve` |
+| `ignore`   | `reject`  |
+| `response` | `respond` |
+
+So `accept` answers an interrupt that allows `approve`, and `ignore` is refused by one
+that doesn't allow `reject`. The sidecar checks each verb with langstage-core's
+`normalize_decision`, the same check `--repl` uses, so both paths accept and refuse the
+same input (gh #117). A decision whose verb is missing or not allowed is refused with
+`error → turn_end` and **no `ack`**, and the interrupt stays pending, so a valid
+`decision` can still answer it. If any entry in `decisions` is refused, none are sent.
+An accepted decision reaches the graph as sent: core rewrites an alias to the canonical
+verb for a `HumanInTheLoopMiddleware` interrupt, which needs it, and hands any other
+interrupt the verb unchanged.
+
 A **`cancel`** stops the turn currently streaming for that `session_id` **cooperatively** —
 it emits a distinct `cancelled` frame (neither `complete` nor `error`) then `turn_end`, and
 **leaves the process, the session, and its in-process checkpointer alive**, so the next
@@ -339,13 +360,15 @@ A client should ignore a frame type or key it doesn't know: new keys are additiv
 
 > A client must handle `error`: a malformed/unknown command, a `message` with no
 > `content`, an invalid `decision` (including a well-formed one sent when the session
-> has no pending interrupt to resume), **and** an agent crashing mid-turn all emit an
+> has no pending interrupt to resume, or one whose verb the interrupt doesn't allow),
+> **and** an agent crashing mid-turn all emit an
 > `error` frame. On the agent-failure path there is no `complete` — the sequence
 > is `ack → error → turn_end`, with any content earlier nodes already produced
 > streamed before the `error` — so don't key turn-completion off `complete` alone.
 >
 > A **rejected** command is still a (zero-length) turn: a `message` with no `content`,
-> a malformed `decision`, or a `decision` with no pending interrupt emits
+> a malformed `decision`, a `decision` with no pending interrupt, or one with a verb the
+> interrupt doesn't allow emits
 > `error → turn_end` — **no `ack`**, since nothing ran — so a client that waits for
 > `turn_end` always stops waiting (gh #118). `turn_end` is the one frame every
 > `message`/`decision` is guaranteed to end with. The same `error → turn_end` shape

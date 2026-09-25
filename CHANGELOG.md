@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.31] - 2026-09-25
+
+Adopts langstage-core 1.0.37 for decision-verb matching. Tests are in
+`tests/test_decision_verbs.py`. The extension is unchanged.
+
+### Fixed
+- **The raw stdio `decision` command checks each verb against the interrupt
+  (gh #117).** Only `--repl` refused a verb the pending interrupt didn't list in
+  `allowed_decisions`. Over the stdio protocol, which the extension uses, a disallowed
+  verb was ACKed and resumed the graph. The sidecar now keeps each session's
+  `allowed_decisions` and checks every decision with core's `normalize_decision`. A
+  decision whose verb is missing or not allowed gets `error → turn_end` with no `ack`,
+  and the interrupt stays pending. If one decision in the list is refused, none are
+  sent.
+- **An interrupt's `config` limits both the verbs offered and the verbs accepted
+  (gh #114).** Since core 1.0.36, `allowed_decisions` follows the interrupt's
+  `config`, so an approve-only interrupt advertises `["approve"]`. With the fix above,
+  the stdio path also refuses the other verbs, so "offers and accepts exactly" is true
+  on both paths.
+
+### Changed
+- **Both drivers accept the legacy aliases `accept` / `ignore` / `response`** for
+  `approve` / `reject` / `respond`, in any case, when the interrupt allows the verb
+  they stand for. `--repl` now uses the same core check as the stdio path. A
+  decision reaches the graph as sent. Core rewrites aliases only for a
+  `HumanInTheLoopMiddleware` interrupt, so a legacy `HumanInterrupt` graph still
+  receives `accept`. The README's Sidecar protocol section lists the verbs and aliases.
+- `langstage-core[agui]` floor raised to `>=1.0.37`. `--show-config --json` gains
+  core's `omitted` key (the shared keys this surface doesn't use).
+
 ## [0.5.30] - 2026-09-25
 
 Wave 4: advertised-not-honored + docs. Each fix has a regression test built from its

@@ -429,7 +429,9 @@ def test_show_config_json_emits_machine_readable_object(monkeypatch, tmp_path, c
     # `[configurable]` table the sidecar forwards to the graph (gh #127), empty here.
     assert obj["issues"] == []
     assert obj["configurable"] == {}
-    assert set(obj) == {"type", "config", "toml", "issues", "configurable"}
+    # core >= 1.0.37 adds `omitted`: the shared keys this surface ignores (core #145).
+    assert set(obj) == {"type", "config", "toml", "issues", "omitted", "configurable"}
+    assert set(obj["omitted"]) == {"host", "port", "title"}
 
 
 def test_show_config_json_matches_config_dict(monkeypatch, tmp_path, capsys):

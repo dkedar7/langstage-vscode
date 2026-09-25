@@ -6,11 +6,12 @@ so a verb the interrupt forbids was ACKed and resumed the graph. Only ``--repl``
 refused it. gh #114: ``allowed_decisions`` used to be the default four whatever the
 interrupt's ``config`` said.
 
-Both drivers now resolve a verb with core's ``normalize_decision`` (langstage-core
+Both drivers now check a verb with core's ``normalize_decision`` (langstage-core
 >= 1.0.37): canonical verbs and the legacy aliases (``accept`` / ``ignore`` /
-``response``) are accepted when the interrupt allows them, and forwarded under the
-canonical name. A disallowed verb gets ``error -> turn_end`` (no ``ack``) and leaves
-the interrupt pending.
+``response``) are accepted when the interrupt allows them. The decision is forwarded
+as sent; core rewrites aliases for a HumanInTheLoopMiddleware request and passes any
+other interrupt the verb verbatim. A disallowed verb gets ``error -> turn_end`` (no
+``ack``) and leaves the interrupt pending.
 """
 import io
 import json
@@ -140,7 +141,8 @@ def test_117_one_disallowed_verb_refuses_the_whole_decision_list():
 
 
 @pytest.mark.parametrize("verb", ["accept", "ACCEPT", "Approve"])
-def test_117_aliases_and_case_are_accepted_and_forwarded_canonically(verb):
+def test_117_aliases_and_case_are_accepted(verb):
+    # The demo's interrupt is a HITL-middleware request, so core hands it `approve`.
     frames = _drive(_demo_tools(), [_msg("ask me first"), _decide(verb)])
     _, answered = _turns(frames)
     assert answered[0] == {"type": "ack", "ref": "decision"}
@@ -154,11 +156,12 @@ def test_117_alias_for_a_disallowed_verb_is_refused():
     assert [f["type"] for f in refused] == ["error", "turn_end"]
 
 
-def test_117_accept_answers_an_approve_only_interrupt():
+def test_117_accept_answers_an_approve_only_interrupt_verbatim():
+    # A legacy HumanInterrupt graph reads its own vocabulary, so it gets `accept` as sent.
     frames = _drive(_approve_only_graph(), [_msg("go"), _decide("accept")])
     _, answered = _turns(frames)
     assert answered[0] == {"type": "ack", "ref": "decision"}
-    assert "resumed with:" in _text(answered)
+    assert "'type': 'accept'" in _text(answered)
 
 
 @pytest.mark.parametrize("decision", [{}, {"type": 5}, "approve", {"type": ""}])
@@ -181,7 +184,7 @@ def _repl(graph, lines):
     return rc, out.getvalue(), err.getvalue()
 
 
-def test_repl_accepts_an_alias_and_sends_the_canonical_verb():
+def test_repl_accepts_an_alias_like_stdio():
     rc, out, err = _repl(_demo_tools(), ["ask me first", "accept", ":quit"])
     assert rc == 0, err
     assert "'type': 'approve'" in out
@@ -197,8 +200,38 @@ def test_parse_repl_decision_uses_core_normalization():
     from langstage_vscode.sidecar import _parse_repl_decision
 
     allowed = ["respond", "approve"]
-    assert _parse_repl_decision("accept", allowed) == ({"type": "approve"}, None)
+    assert _parse_repl_decision("accept", allowed) == ({"type": "accept"}, None)
+    assert _parse_repl_decision("ACCEPT", allowed) == ({"type": "accept"}, None)
     assert _parse_repl_decision("response ok", allowed) == (
-        {"type": "respond", "message": "ok"}, None)
+        {"type": "response", "message": "ok"}, None)
+    decision, err = _parse_repl_decision("response", allowed)
+    assert decision is None and "respond <text>" in err  # grammar of the canonical verb
     decision, err = _parse_repl_decision("ignore", allowed)
     assert decision is None and "not a decision this interrupt allows" in err
+
+
+def test_114_changelog_example_offers_only_reject_and_approve_in_repl():
+    """The CHANGELOG's example (allow_ignore + allow_accept): `--repl` offers exactly
+    those two verbs, never an `edit <json>` payload, and refuses `edit`."""
+    def node(state: _S):
+        answer = interrupt([{
+            "action_request": {"action": "confirm", "args": {}},
+            "config": {"allow_ignore": True, "allow_accept": True,
+                       "allow_edit": False, "allow_respond": False},
+        }])
+        return {"messages": [AIMessage(content=f"resumed with: {answer}")]}
+
+    g = StateGraph(_S)
+    g.add_node("ask", node)
+    g.add_edge(START, "ask")
+    g.add_edge("ask", END)
+    graph = g.compile(checkpointer=MemorySaver())
+
+    rc, out, err = _repl(graph, ["go", 'edit {"edited_action": {}}', "ignore", ":quit"])
+    notice = err.split("not a decision", 1)[0]
+    allowed_line = next(ln for ln in notice.splitlines() if "allowed:" in ln)
+    offered = sorted(v.strip() for v in allowed_line.split("allowed:", 1)[1].split("|"))
+    assert offered == ["approve", "reject"]
+    assert "edit <json>" not in notice
+    assert "`edit` is not a decision this interrupt allows" in err
+    assert rc == 0 and "'type': 'ignore'" in out  # answered with the alias, verbatim
