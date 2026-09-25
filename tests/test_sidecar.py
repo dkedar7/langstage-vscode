@@ -377,18 +377,18 @@ def test_main_accepts_and_ignores_removed_agui_flag(monkeypatch, tmp_path, capsy
 
 
 def test_main_show_config_omits_inert_server_keys(monkeypatch, tmp_path, capsys):
-    # The stdio sidecar never opens a socket or renders a UI, so host/port/debug/
-    # title do nothing — --show-config must not advertise them. (gh #14)
+    # The stdio sidecar never opens a socket or renders a UI, so host/port/title do
+    # nothing — --show-config must not advertise them. (gh #14)
     _isolate_config(monkeypatch, tmp_path)
     monkeypatch.setenv("LANGSTAGE_PORT", "12345")
     monkeypatch.setenv("LANGSTAGE_HOST", "0.0.0.0")
     assert main(["--show-config"]) == 0
     out = capsys.readouterr().out
-    for inert in ("LANGSTAGE_PORT", "LANGSTAGE_HOST", "LANGSTAGE_DEBUG", "LANGSTAGE_TITLE"):
+    for inert in ("LANGSTAGE_PORT", "LANGSTAGE_HOST", "LANGSTAGE_TITLE"):
         assert inert not in out
     assert "\n  port " not in out and "\n  host " not in out
-    # ...but the keys the sidecar honors are still shown.
-    assert "agent_spec" in out and "workspace_root" in out
+    # ...but the keys the sidecar honors are still shown, debug included (gh #95).
+    assert "agent_spec" in out and "workspace_root" in out and "\n  debug " in out
 
 
 # ── gh #71: --show-config --json — the machine-readable form ───────────
@@ -406,8 +406,8 @@ def test_show_config_json_emits_machine_readable_object(monkeypatch, tmp_path, c
     obj = json.loads(out)  # a single, valid JSON object — nothing else on stdout
     assert isinstance(obj, dict)
     assert obj["type"] == "show_config"
-    # Provenance for the two keys the sidecar honors.
-    assert set(obj["config"]) == {"agent_spec", "workspace_root"}
+    # Provenance for the keys the sidecar honors (debug since gh #95).
+    assert set(obj["config"]) == {"agent_spec", "workspace_root", "debug"}
     for entry in obj["config"].values():
         assert {"value", "source", "env", "legacy_env", "toml"} <= set(entry)
     # Pure defaults: no toml, values at their defaults.
@@ -448,7 +448,7 @@ def test_show_config_json_matches_config_dict(monkeypatch, tmp_path, capsys):
         json.dumps(
             HostConfig.resolve(
                 overrides={"agent_spec": None, "workspace_root": None}
-            ).config_dict(omit_keys=["host", "port", "debug", "title"]),
+            ).config_dict(omit_keys=["host", "port", "title"]),
             default=str,
         )
     )
@@ -476,16 +476,16 @@ def test_show_config_json_provenance_matches_toml(monkeypatch, tmp_path, capsys)
 
 
 def test_show_config_json_omits_inert_server_keys(monkeypatch, tmp_path, capsys):
-    # The host/port/debug/title omit list applies to the JSON form too, so the text
-    # and JSON agree on which keys show — the inert server/UI keys appear in neither
-    # (gh #14/#71).
+    # The host/port/title omit list applies to the JSON form too, so the text and JSON
+    # agree on which keys show — the inert server/UI keys appear in neither
+    # (gh #14/#71). debug is honored, so it shows in both (gh #95).
     _isolate_config(monkeypatch, tmp_path)
     monkeypatch.setenv("LANGSTAGE_PORT", "12345")
     monkeypatch.setenv("LANGSTAGE_HOST", "0.0.0.0")
     assert main(["--show-config", "--json"]) == 0
     obj = json.loads(capsys.readouterr().out)
-    assert set(obj["config"]) == {"agent_spec", "workspace_root"}
-    for inert in ("host", "port", "debug", "title"):
+    assert set(obj["config"]) == {"agent_spec", "workspace_root", "debug"}
+    for inert in ("host", "port", "title"):
         assert inert not in obj["config"]
 
 

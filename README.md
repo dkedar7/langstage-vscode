@@ -131,7 +131,11 @@ as `"malformed": true` with the parse error, rather than as absent.
 Preflight the interpreter and your agent before wiring up chat — `--selfcheck`
 (alias `--smoke`) loads the configured agent (or the demo stub), asserts it's a
 runnable graph, drives one turn, and exits `0` (healthy) / non-zero with a precise
-message (add `--json` for a machine-readable verdict):
+message (add `--json` for a machine-readable verdict). If that turn pauses on a
+human-in-the-loop interrupt instead of replying, the verdict is `PAUSED:` (`"ok": false,
+"interrupt": true` in `--json`) with exit `2`, the code `--message` uses for a pause.
+Interactive approval is not wired into the chat UI yet, so such an agent would wait on its
+first `@langstage` turn:
 
 ```bash
 langstage-vscode-sidecar --selfcheck                       # validate the runtime via the demo stub
@@ -264,7 +268,7 @@ Open the chat panel and start a message with `@langstage`:
 ```
 
 The extension streams the agent's content, tool calls, reasoning, and todo
-updates into the chat response.
+updates (a `write_todos` call renders as a **Tasks** checklist) into the chat response.
 
 ## Sidecar protocol
 
@@ -303,13 +307,20 @@ with no turn in flight for the session is answered with an `error` frame
 
 ```jsonc
 {"type": "ready"}                          // emitted once at startup
-{"type": "ack", "ref": "message"}          // command accepted
-{"type": "content", "content": "...", "message_id": "..."}  // assistant text
-                                           // a new message_id = a new assistant message
-                                           // (render a paragraph break between them)
-{"type": "tool_start", "name": "...", ...} // tool call
-{"type": "tool_end", "name": "...", ...}   // tool result
-{"type": "interrupt", "action_requests": [...]}  // human-in-the-loop
+{"type": "ack", "ref": "message"}          // command accepted ("ref": "decision" for a decision)
+{"type": "content", "content": "...", "role": "assistant", "node": "...", "message_id": "..."}
+                                           // assistant text; a new message_id = a new
+                                           // assistant message (render a paragraph break)
+{"type": "reasoning", "content": "...", "node": "..."}
+                                           // model reasoning, kept separate from content
+{"type": "tool_start", "id": "...", "name": "...", "args": {...}, "node": "..."}  // tool call
+{"type": "tool_end", "id": "...", "name": "...", "result": "...", "status": "success",
+ "error_message": null, "duration_ms": 0}  // tool result ("status": "error" if it failed)
+{"type": "extraction", "tool_name": "write_todos", "extracted_type": "todos", "data": [...]}
+                                           // structured data from a tool result; the
+                                           // extension renders "todos" as a Tasks checklist
+{"type": "interrupt", "action_requests": [...], "review_configs": [...],
+ "allowed_decisions": ["approve", "reject", ...]}  // human-in-the-loop
 {"type": "complete", "outcome": "complete"} // turn finished ("interrupted" if it paused
                                            // on an interrupt) — see the note below
 {"type": "cancelled", "session_id": "s1"}  // turn stopped by a `cancel` (not complete/error)
@@ -317,8 +328,14 @@ with no turn in flight for the session is answered with an `error` frame
                                            // OR an exception raised by the agent.
                                            // On agent failure the turn emits this
                                            // INSTEAD of "complete", then "turn_end".
+                                           // With debug on, it also carries "traceback".
 {"type": "turn_end", "session_id": "s1"}
 ```
+
+The sidecar wires core's `TodoExtractor` into every turn, so an agent that calls
+`write_todos` (the `deepagents` planning tool) emits the `todos` `extraction` frame above.
+`--demo=tools` wires the demo's own extractor instead (`"extracted_type": "demo_fact"`).
+A client should ignore a frame type or key it doesn't know: new keys are additive.
 
 > A client must handle `error`: a malformed/unknown command, a `message` with no
 > `content`, an invalid `decision` (including a well-formed one sent when the session

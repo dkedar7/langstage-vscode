@@ -573,6 +573,11 @@ def _agent_key_typos(cfg: Any) -> list[str]:
     ]
 
 
+# `--selfcheck` exit code for an agent whose preflight turn paused on an interrupt
+# (gh #130) — the same "paused awaiting a decision" code `--message` / `--repl` use.
+SELFCHECK_PAUSED_EXIT = 2
+
+
 def _selfcheck(
     spec: str,
     cfg: Any,
@@ -600,7 +605,9 @@ def _selfcheck(
 
     from langstage_vscode import __version__
 
-    def verdict(ok: bool, msg: str, traceback: str | None = None) -> int:
+    def verdict(
+        ok: bool, msg: str, traceback: str | None = None, *, paused: bool = False
+    ) -> int:
         # gh #83: when --traceback / LANGSTAGE_DEBUG is on and the preflight turn errored,
         # core carries the crash's Python traceback in the error frame; thread it into the
         # verdict so a FAIL says WHERE, not just what — a "traceback" field in --json (CI can
@@ -611,14 +618,19 @@ def _selfcheck(
                 payload["demo_fallback"] = True
             if traceback:
                 payload["traceback"] = traceback
+            if paused:
+                payload["interrupt"] = True
             sys.stdout.write(json.dumps(payload) + "\n")
             sys.stdout.flush()
         else:
             # The message echoes the user's spec, which may not encode on a cp1252
             # stderr; write it console-safe like every other human-readable path.
-            safe_write(("OK: " if ok else "FAIL: ") + msg + "\n", sys.stderr)
+            label = "OK: " if ok else ("PAUSED: " if paused else "FAIL: ")
+            safe_write(label + msg + "\n", sys.stderr)
             if traceback:
                 safe_write(traceback if traceback.endswith("\n") else traceback + "\n", sys.stderr)
+        if paused:
+            return SELFCHECK_PAUSED_EXIT
         return 0 if ok else 1
 
     # gh #124: no agent resolved, but the toml has a key that looks like a typo'd spec
@@ -696,6 +708,19 @@ def _selfcheck(
     if "complete" not in types or "turn_end" not in types:
         return verdict(
             False, f"agent spec {spec!r} did not complete a turn (frames: {types})"
+        )
+
+    # gh #130: an interrupt turn still ends `complete -> turn_end`, but the agent paused
+    # without replying. Interactive approval is not wired into the chat UI yet, so this
+    # agent would leave the chat panel waiting on its first turn. Report the pause as its
+    # own verdict: ok false, "interrupt": true, exit 2 (the code --message uses for it).
+    if "interrupt" in types:
+        return verdict(
+            False,
+            f"agent spec {spec!r} paused on a human-in-the-loop interrupt instead of "
+            "replying. Interactive approval is not wired into the chat UI yet, so this "
+            "agent will wait on its first @langstage turn.",
+            paused=True,
         )
 
     ok_msg = (
@@ -1365,7 +1390,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="selfcheck",
         help="Preflight: load the configured agent (or the demo stub), assert it is a runnable "
-        "graph, drive one turn, and exit 0 (healthy) / non-zero. Does not enter the command loop.",
+        "graph, drive one turn, and exit 0 (healthy), 2 (the turn paused on a human-in-the-loop "
+        "interrupt) or 1 (failed). Does not enter the command loop.",
     )
     parser.add_argument(
         "--message",
@@ -1454,11 +1480,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.show_config:
         # This is a pure stdio sidecar — it never opens a socket or renders a
-        # UI, so the inherited host/port/debug/title keys do nothing here.
+        # UI, so the inherited host/port/title keys do nothing here.
         # Hide them so --show-config only advertises what the sidecar honors
-        # (agent_spec, workspace_root) — in BOTH the text and --json forms, from
-        # the SAME omit list, so the two agree on which keys show. (gh #14)
-        omit_keys = ["host", "port", "debug", "title"]
+        # (agent_spec, workspace_root, debug) — in BOTH the text and --json forms,
+        # from the SAME omit list, so the two agree on which keys show. (gh #14)
+        # `debug` IS honored (the error-frame traceback, gh #83/#90), so it shows
+        # (gh #95).
+        omit_keys = ["host", "port", "title"]
         # gh #127: the [configurable] table is forwarded to the graph (below), so the
         # diagnostic shows it too, through core's own renderer (describe/config_dict take
         # it as `configurable=`), so every surface prints it the same way.
@@ -1531,13 +1559,20 @@ def main(argv: list[str] | None = None) -> int:
     # CHANGELOG), which core emits ONLY when a `ToolExtractor` is wired into the turn.
     # Wire the demo's own paired extractors — the same `demo_extractors()` the demo
     # graph uses — on the `--demo=tools` path, so the documented frame is actually
-    # produced instead of being unreachable through the sidecar. Every other path keeps
-    # `()`, so a real adopter's agent turns are unchanged.
-    extractors: Iterable[Any] = ()
+    # produced instead of being unreachable through the sidecar.
+    # gh #98: every other path wires core's `TodoExtractor`, so a real agent's
+    # `write_todos` call (the deepagents planning tool) emits the `todos` extraction
+    # frame the extension renders as its Tasks checklist, as the README advertises.
+    # It only fires on a `write_todos` tool result; other turns are unchanged.
+    extractors: Iterable[Any]
     if args.demo == "tools":
         from langstage_core.demo.tools import demo_extractors
 
         extractors = demo_extractors()
+    else:
+        from langstage_core import TodoExtractor
+
+        extractors = (TodoExtractor(),)
 
     # --message is one-shot, --repl is multi-turn interactive; both drive turns but
     # over different input models, so asking for both is a contradiction.

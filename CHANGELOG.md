@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.30] - 2026-09-25
+
+Wave 4: advertised-not-honored + docs. Each fix has a regression test built from its
+issue's repro (`tests/test_wave4_advertised.py`). The extension is unchanged.
+
+### Fixed
+- **`--show-config` shows `debug` (gh #95).** The sidecar honors `debug` (toml
+  `debug = true`, `LANGSTAGE_DEBUG`, `--traceback`: the error frame carries the traceback),
+  but `--show-config` and `--show-config --json` still hid it as an inert server key
+  (gh #14). It is now a resolved row with its value and source. `host` / `port` / `title`
+  stay hidden, since the stdio sidecar ignores them.
+- **A real agent's `write_todos` renders as the Tasks checklist (gh #98).** The README
+  advertises todo updates, and the extension renders a `todos` `extraction` frame as a
+  **Tasks** checklist, but the sidecar wired extractors only for `--demo=tools`, so no real
+  agent ever produced that frame. Every non-demo turn now wires core's `TodoExtractor`, so a
+  `write_todos` result (the `deepagents` planning tool) emits
+  `{"type": "extraction", "tool_name": "write_todos", "extracted_type": "todos", ...}`.
+  Other tool results are unchanged.
+- **`--selfcheck` reports an interrupt pause distinctly (gh #130).** An agent whose
+  preflight turn paused on a human-in-the-loop interrupt got `OK`, `ok: true` and exit 0,
+  while `--message` on the same turn exits 2. Interactive approval is not wired into the
+  chat UI yet, so such an agent waits on its first `@langstage` turn. The verdict is now
+  `PAUSED: ...` (`"ok": false, "interrupt": true` in `--json`), exit `2`, the same pause
+  code `--message` / `--repl` use. `--help` and the README document the codes.
+
+### Docs
+- **The README's Events list names every frame the sidecar emits (gh #102).** It was
+  missing `reasoning` and `extraction`. It now also shows the current keys:
+  `message_id` / `role` / `node` on `content`, `id` / `args` / `status` / `duration_ms` on
+  the tool frames, `review_configs` / `allowed_decisions` on `interrupt`, `outcome` on
+  `complete`, and `traceback` on `error` in debug mode. A test compares the list against
+  the frames the sidecar actually emits.
+
 ## [0.5.29] - 2026-09-24
 
 _Also ships VS Code extension 0.3.4 (`extension/package.json` 0.3.3 -> 0.3.4)._
