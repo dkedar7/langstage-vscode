@@ -36,6 +36,9 @@ from langstage_core import apply_workspace, load_agent_spec, workspace_root
 # which backslash-escapes what the stream can't encode (core 1.0.36, replacing the
 # sidecar's own `_write_safe` copy). The JSON protocol path is ASCII via ensure_ascii.
 from langstage_core.console import safe_write
+# Decision-verb matching (core >= 1.0.37, gh #117/#114): canonical verbs plus the legacy
+# aliases (accept/ignore/response), which both drivers validate a decision against.
+from langstage_core.resume import normalize_decision
 
 DEFAULT_MAX_RESULT_LEN = 50_000
 
@@ -259,7 +262,9 @@ def run(
     # rather than ack + drive a spurious turn (gh #65 — the non-empty sibling of the
     # empty-list case gh #33 already closed). Keyed per session_id/thread because the
     # sidecar can hold several sessions at once.
-    pending_interrupts: set[str] = set()
+    # gh #117: the value is the pending interrupt's own ``allowed_decisions``, so a
+    # ``decision`` is validated against it before it is ACKed, as ``--repl`` does.
+    pending_interrupts: dict[str, list[str]] = {}
 
     while True:
         raw = intake.next_command()
@@ -363,6 +368,29 @@ def run(
                 # client's waiting turn with `turn_end`.
                 emit({"type": "turn_end", "session_id": session_id})
                 continue
+            # gh #117: every decision's verb must be one the pending interrupt allows
+            # (aliases included, via core's normalize_decision). One that isn't is
+            # refused like the guards above: error -> turn_end, no ack, and the
+            # interrupt stays pending so a valid decision can still answer it. Accepted
+            # decisions are forwarded unchanged (see ``_decision_allowed``).
+            allowed = pending_interrupts[session_id]
+            refusal: str | None = None
+            for d in decisions:
+                verb = d.get("type") if isinstance(d, dict) else None
+                if not isinstance(verb, str) or not verb.strip():
+                    refusal = "each decision must be an object with a string 'type'"
+                    break
+                if _decision_allowed(verb, allowed) is None:
+                    refusal = (
+                        f"decision {verb!r} is not allowed by the pending interrupt for "
+                        f"session {session_id!r}; allowed: "
+                        + (" | ".join(allowed) if allowed else "(none advertised)")
+                    )
+                    break
+            if refusal is not None:
+                emit({"type": "error", "error": refusal})
+                emit({"type": "turn_end", "session_id": session_id})
+                continue
             emit({"type": "ack", "ref": "decision"})
             agui_resume = {"decisions": decisions}
         elif ctype == "cancel":
@@ -378,8 +406,17 @@ def run(
             continue
 
         should_cancel = intake.cancel_check(session_id) if enable_cancel else None
+        # Keep this turn's interrupt frame, so its allowed_decisions can validate the
+        # decision that answers it (gh #117).
+        turn_interrupt: list[dict[str, Any]] = []
+
+        def turn_emit(frame: dict[str, Any]) -> None:
+            if frame.get("type") == "interrupt":
+                turn_interrupt[:] = [frame]
+            emit(frame)
+
         saw_interrupt, cancelled = _run_turn_agui(
-            agui_agent, agui_message, agui_resume, config, max_result_len, emit,
+            agui_agent, agui_message, agui_resume, config, max_result_len, turn_emit,
             should_cancel=should_cancel, extractors=extractors,
         )
         # gh #67: a cancelled turn emits `cancelled` (not `complete`) then `turn_end`,
@@ -388,11 +425,13 @@ def run(
         # state (an interrupt turn leaves it PENDING; anything else clears it).
         if cancelled:
             emit({"type": "cancelled", "session_id": session_id})
-            pending_interrupts.discard(session_id)
+            pending_interrupts.pop(session_id, None)
         elif saw_interrupt:
-            pending_interrupts.add(session_id)
+            pending_interrupts[session_id] = _interrupt_allowed(
+                turn_interrupt[0] if turn_interrupt else {}
+            )
         else:
-            pending_interrupts.discard(session_id)
+            pending_interrupts.pop(session_id, None)
         emit({"type": "turn_end", "session_id": session_id})
 
 
@@ -774,6 +813,22 @@ def _interrupt_allowed(frame: dict[str, Any]) -> list[str]:
     return [str(d) for d in (frame.get("allowed_decisions") or [])]
 
 
+def _decision_allowed(verb: Any, allowed: list[str]) -> str | None:
+    """The canonical verb for a decision ``verb`` if the interrupt advertising
+    ``allowed`` accepts it, else ``None``.
+
+    Both drivers (the raw stdio ``decision`` handler and ``--repl``) check through
+    here, so they accept and refuse exactly the same input (gh #117). It is core's
+    ``normalize_decision``: case-insensitive, and the legacy aliases ``accept`` /
+    ``ignore`` / ``response`` count as ``approve`` / ``reject`` / ``respond``.
+
+    The verb is only checked here, never rewritten. The decision goes to the graph as
+    the client spelled it: core rewrites aliases for a HumanInTheLoopMiddleware request,
+    which needs canonical verbs, and passes every other interrupt its payload verbatim,
+    because that graph reads its own vocabulary."""
+    return normalize_decision(verb, allowed)
+
+
 # Payload grammar per decision verb, for rendering usage hints and parsing a REPL
 # answer line. NOTE: which verbs are ACCEPTED never comes from here — that is always
 # the frame's own ``allowed_decisions`` (see ``_interrupt_allowed``). This table only
@@ -986,8 +1041,10 @@ def _parse_repl_decision(
     ``text`` is the answer with any ``:decision`` prefix already stripped: a verb plus
     an optional payload. ``allowed`` is the pending frame's own ``allowed_decisions``
     and is the ONLY source of which verbs are valid — a verb the interrupt didn't
-    advertise is refused even if it is a canonical HITL verb. Verb matching is
-    case-insensitive but the decision carries the frame's spelling.
+    advertise is refused even if it is a canonical HITL verb. Verbs resolve through
+    ``_decision_allowed`` (the same check the raw stdio handler uses, gh #117):
+    case-insensitive, legacy aliases accepted. The decision carries the frame's
+    spelling, or the alias as typed.
 
     Payload grammar (see ``_DECISION_ARGS``):
 
@@ -1000,18 +1057,21 @@ def _parse_repl_decision(
     """
     verb, _, payload = text.partition(" ")
     payload = payload.strip()
-    match = next((a for a in allowed if a.lower() == verb.lower()), None)
-    if match is None:
+    canon = _decision_allowed(verb, allowed)
+    if canon is None:
         return None, f"`{verb}` is not a decision this interrupt allows"
+    # Send the frame's spelling when the verb names an advertised entry, else the alias
+    # as typed (lowercased). The payload grammar is looked up by the canonical verb.
+    match = next((a for a in allowed if a.lower() == verb.lower()), verb.lower())
 
-    required, kind = _DECISION_ARGS.get(match, _DECISION_ARGS_DEFAULT)
+    required, kind = _DECISION_ARGS.get(canon, _DECISION_ARGS_DEFAULT)
     if kind is None and payload:
         # `approve some junk` is a typo or a misunderstanding, not an approval with a
         # note — refuse rather than send a decision carrying a field the shape has no
         # room for.
         return None, f"`{match}` takes no payload (got {payload!r})"
     if required and not payload:
-        return None, f"`{match}` needs a payload -- {_decision_usage(match)}"
+        return None, f"`{match}` needs a payload -- {_decision_usage(canon)}"
     if not payload:
         return {"type": match}, None
     if kind == "json" or payload.startswith("{"):
