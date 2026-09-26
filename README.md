@@ -268,6 +268,22 @@ from deepagents import create_deep_agent
 graph = create_deep_agent(...)   # -> langstage.agentSpec = "my_agent.py:graph"
 ```
 
+### Exit codes
+
+The sidecar uses the LangStage family exit codes
+([core ADR 0007](https://github.com/dkedar7/langstage-core/blob/main/docs/adr/0007-family-exit-codes.md)),
+the same on every surface:
+
+| Code | Meaning |
+|---|---|
+| `0` | success: `--selfcheck` healthy, `--message` replied, `--repl` / the stdio loop ended cleanly, `--show-config` printed |
+| `1` | failure: no agent spec, the agent failed to load, an unusable `--workspace`, an error frame, a failed `--selfcheck` |
+| `2` | paused on a human-in-the-loop interrupt (`--selfcheck`, `--message`, or `--repl` ending with one unanswered) |
+| `64` | usage error: an unknown flag or bad value (`--demo=bogus`), or conflicting flags (`--demo` with `--agent`, `--repl` with `--message`) |
+
+`2` means only "paused". Usage errors exit `64` rather than argparse's default `2`, so a
+typo'd flag in a script can't read as a pause.
+
 ## Usage
 
 Open the chat panel and start a message with `@langstage`:

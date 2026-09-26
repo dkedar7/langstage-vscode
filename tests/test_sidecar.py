@@ -514,7 +514,7 @@ def test_main_no_spec_emits_error(monkeypatch, tmp_path, capsys):
 
 def test_main_demo_conflicts_with_agent(monkeypatch, tmp_path, capsys):
     _isolate_config(monkeypatch, tmp_path)
-    assert main(["--demo", "--agent", "x.py:g"]) == 1
+    assert main(["--demo", "--agent", "x.py:g"]) == 64  # usage error (ADR 0007)
     err = json.loads(capsys.readouterr().out.strip())
     assert "mutually exclusive" in err["error"]
 
@@ -677,20 +677,20 @@ def test_main_demo_echo_explicit_matches_bare(monkeypatch, tmp_path, capsys):
 
 
 def test_main_demo_invalid_value_is_argparse_error(monkeypatch, tmp_path, capsys):
-    """--demo=<bad> is an argparse choices error (exit 2), not a silent fallback (gh #73)."""
+    """--demo=<bad> is an argparse choices error (exit 64, ADR 0007), not a silent fallback (gh #73)."""
     import pytest
 
     _isolate_config(monkeypatch, tmp_path)
     with pytest.raises(SystemExit) as exc:
         main(["--demo=bogus"])
-    assert exc.value.code == 2
+    assert exc.value.code == 64
     assert "invalid choice" in capsys.readouterr().err
 
 
 def test_main_demo_tools_conflicts_with_agent(monkeypatch, tmp_path, capsys):
     """The mutual-exclusion guard holds for the tools variant too (gh #73)."""
     _isolate_config(monkeypatch, tmp_path)
-    assert main(["--demo=tools", "--agent", "x.py:g"]) == 1
+    assert main(["--demo=tools", "--agent", "x.py:g"]) == 64  # usage error (ADR 0007)
     err = json.loads(capsys.readouterr().out.strip())
     assert "mutually exclusive" in err["error"]
 
@@ -1108,7 +1108,7 @@ def test_main_repl_conflicts_with_message(monkeypatch, tmp_path, capsys):
     # mutex is a front-door fail() site, so in text mode it routes to STDERR (`error: ...`),
     # not a JSON frame on stdout (the mutex-in-detail assertions live in the gh #84 block).
     _isolate_config(monkeypatch, tmp_path)
-    assert main(["--demo", "--repl", "--message", "hi"]) == 1
+    assert main(["--demo", "--repl", "--message", "hi"]) == 64  # usage error (ADR 0007)
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.startswith("error: ")
@@ -2148,7 +2148,7 @@ def test_message_mutex_misuse_errors_on_stderr_not_stdout(monkeypatch, tmp_path,
     # gh #84: --repl --message (mutually exclusive) reaches a fail() site BEFORE the load
     # path; in text mode it must route to stderr too, not leak JSON to stdout.
     _isolate_config(monkeypatch, tmp_path)
-    assert main(["--demo", "--repl", "--message", "hi"]) == 1
+    assert main(["--demo", "--repl", "--message", "hi"]) == 64  # usage error (ADR 0007)
     captured = capsys.readouterr()
     assert captured.out == ""  # stdout clean
     assert captured.err.startswith("error: ")
