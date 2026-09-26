@@ -4,16 +4,40 @@
 
 # langstage-vscode
 
-Chat with your own **LangGraph** agent from inside VS Code — in the
-same chat panel as Copilot — via the `@langstage` chat participant.
+Chat with your own **LangGraph** agent from inside your editor, in the **LangStage
+panel**: the extension's own chat view, so it works in VS Code **without Copilot**, and
+in Cursor, VSCodium, Windsurf and code-server. Streaming replies, tool-call cards,
+reasoning, approval cards, and several conversations saved per workspace. (The panel
+is a preview.)
+
+<p align="center">
+  <img src="https://dkedar7.github.io/langstage-docs/assets/demos/vscode.gif" alt="The LangStage panel running the keyless demo agent: a tool card, reasoning, an approval prompt answered with Approve, and the resumed reply" width="440">
+</p>
+
+<sub>If the image above doesn't load, the same recording is in this repo:
+[`docs/assets/panel-demo.gif`](docs/assets/panel-demo.gif).</sub>
+
+Using Copilot? The same agent is also the **`@langstage` chat participant** in
+Copilot's chat view ([below](#for-copilot-users-the-langstage-chat-participant)).
+
+**Quick install** (details in [Install](#install)):
+
+1. `pip install langstage-vscode` (the Python sidecar, in the environment that can import
+   your agent).
+2. Download `langstage-vscode-<version>.vsix` from the
+   [latest extension release](https://github.com/dkedar7/langstage-vscode/releases/latest)
+   and run **Extensions: Install from VSIX…** (or `code --install-extension
+   langstage-vscode-0.6.0.vsix`).
+3. Open the **LangStage** view in the activity bar and click **Try the demo**, or set
+   `langstage.agentSpec` to your agent.
 
 > Renamed from **deepagent-vscode** (the old package name now just installs
 > this one; `python -m deepagent_vscode` and the old sidecar command still work).
 
 It has two parts in one repo:
 
-- **`extension/`** — a TypeScript VS Code extension that registers the
-  `@langstage` chat participant and renders agent output in the chat view.
+- **`extension/`** — a TypeScript extension: the LangStage panel (a webview view) and
+  the `@langstage` chat participant.
 - **`langstage_vscode/`** — a small Python **stdio sidecar** that loads your
   agent and streams its events. Built on
   [`langstage-core`](https://github.com/dkedar7/langstage-core),
@@ -21,9 +45,9 @@ It has two parts in one repo:
   (`langstage`, `langstage-jupyter`, `langstage-cli`).
 
 ```
-┌─ VS Code chat panel ────────────────────────────┐
-│  @langstage  (TypeScript extension)              │
-│        │  spawns                                 │
+┌─ your editor ───────────────────────────────────┐
+│  LangStage panel  /  @langstage (Copilot chat)   │
+│        │  the extension spawns                   │
 │        ▼                                          │
 │  python -m langstage_vscode   (stdio sidecar)    │
 │        │  NDJSON over stdin/stdout               │
@@ -32,8 +56,9 @@ It has two parts in one repo:
 └──────────────────────────────────────────────────┘
 ```
 
-> **Status: early.** The extension is not yet on the VS Code Marketplace: install
-> the `.vsix` that CI builds (see [Install](#extension)), or run it from source.
+> **Status: preview.** The extension is not yet on the VS Code Marketplace or Open VSX:
+> install the `.vsix` from the [GitHub releases](https://github.com/dkedar7/langstage-vscode/releases)
+> (see [Install](#extension)), or run it from source.
 
 ## Every stage for your LangGraph agent
 
@@ -79,14 +104,21 @@ rendering surface, without an agent or API key (parity with `langstage-agui
 
 ### Extension
 
-The extension is not on the Marketplace yet. Every CI run builds an installable
-`.vsix`: open the latest [CI run on `main`](https://github.com/dkedar7/langstage-vscode/actions/workflows/ci.yml?query=branch%3Amain),
-download the **`langstage-vscode-vsix`** artifact, unzip it, and install it (VS Code
-1.95 or newer):
+The extension is not on the Marketplace or Open VSX yet. Each release is a `.vsix` on
+GitHub: download `langstage-vscode-<version>.vsix` from the
+[latest extension release](https://github.com/dkedar7/langstage-vscode/releases/latest)
+([0.6.0](https://github.com/dkedar7/langstage-vscode/releases/tag/extension-v0.6.0) at the
+time of writing), then either run **Extensions: Install from VSIX…** from the command
+palette and pick the file, or install it from a terminal (VS Code 1.95 or newer; use
+`cursor`, `codium` or `windsurf` in place of `code` in those editors):
 
 ```bash
-code --install-extension langstage-vscode-<version>.vsix
+code --install-extension langstage-vscode-0.6.0.vsix
 ```
+
+Every CI run on `main` also builds a `.vsix` (the **`langstage-vscode-vsix`** artifact of
+the [CI workflow](https://github.com/dkedar7/langstage-vscode/actions/workflows/ci.yml?query=branch%3Amain)),
+if you want an unreleased build.
 
 Or build the same file yourself:
 
