@@ -4,6 +4,10 @@
 
 # langstage-vscode
 
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/dkedar7.langstage-vscode?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=dkedar7.langstage-vscode)
+[![Open VSX](https://img.shields.io/open-vsx/v/dkedar7/langstage-vscode?label=Open%20VSX)](https://open-vsx.org/extension/dkedar7/langstage-vscode)
+[![PyPI](https://img.shields.io/pypi/v/langstage-vscode?label=PyPI%20sidecar)](https://pypi.org/project/langstage-vscode/)
+
 Chat with your own **LangGraph** agent from inside your editor, in the **LangStage
 panel**: the extension's own chat view, so it works in VS Code **without Copilot**, and
 in Cursor, VSCodium, Windsurf and code-server. Streaming replies, tool-call cards,
@@ -24,10 +28,9 @@ Copilot's chat view ([below](#for-copilot-users-the-langstage-chat-participant))
 
 1. `pip install langstage-vscode` (the Python sidecar, in the environment that can import
    your agent).
-2. Download `langstage-vscode-<version>.vsix` from the
-   [latest extension release](https://github.com/dkedar7/langstage-vscode/releases/latest)
-   and run **Extensions: Install from VSIX…** (or `code --install-extension
-   langstage-vscode-0.6.0.vsix`).
+2. Search **LangStage** in the Extensions view and install it (from the
+   [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=dkedar7.langstage-vscode); Cursor, VSCodium and Windsurf install it from
+   [Open VSX](https://open-vsx.org/extension/dkedar7/langstage-vscode)).
 3. Open the **LangStage** view in the activity bar and click **Try the demo**, or set
    `langstage.agentSpec` to your agent.
 
@@ -56,9 +59,10 @@ It has two parts in one repo:
 └──────────────────────────────────────────────────┘
 ```
 
-> **Status: preview.** The extension is not yet on the VS Code Marketplace or Open VSX:
-> install the `.vsix` from the [GitHub releases](https://github.com/dkedar7/langstage-vscode/releases)
-> (see [Install](#extension)), or run it from source.
+> **Status: preview.** The extension is on the
+> [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=dkedar7.langstage-vscode) and [Open VSX](https://open-vsx.org/extension/dkedar7/langstage-vscode)
+> (see [Install](#extension)); each release's `.vsix` is also on
+> [GitHub releases](https://github.com/dkedar7/langstage-vscode/releases).
 
 ## Every stage for your LangGraph agent
 
@@ -104,17 +108,26 @@ rendering surface, without an agent or API key (parity with `langstage-agui
 
 ### Extension
 
-The extension is not on the Marketplace or Open VSX yet. Each release is a `.vsix` on
-GitHub: download `langstage-vscode-<version>.vsix` from the
-[latest extension release](https://github.com/dkedar7/langstage-vscode/releases/latest)
-([0.6.0](https://github.com/dkedar7/langstage-vscode/releases/tag/extension-v0.6.0) at the
-time of writing), then either run **Extensions: Install from VSIX…** from the command
-palette and pick the file, or install it from a terminal (VS Code 1.95 or newer; use
-`cursor`, `codium` or `windsurf` in place of `code` in those editors):
+Open the Extensions view (**Ctrl+Shift+X** / **Cmd+Shift+X**), search **LangStage**, and
+click **Install** (VS Code 1.95 or newer). The extension ID is `dkedar7.langstage-vscode`:
+
+- **VS Code** installs it from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=dkedar7.langstage-vscode).
+- **Cursor, VSCodium, Windsurf** (and other Open VSX-based editors) install it from
+  [Open VSX](https://open-vsx.org/extension/dkedar7/langstage-vscode).
+
+Or from a terminal (use `cursor`, `codium` or `windsurf` in place of `code` in those
+editors):
 
 ```bash
-code --install-extension langstage-vscode-0.6.0.vsix
+code --install-extension dkedar7.langstage-vscode
 ```
+
+**Fallback: install the VSIX.** Each release's `.vsix` is also attached to its GitHub
+release: download `langstage-vscode-<version>.vsix` from the
+[latest extension release](https://github.com/dkedar7/langstage-vscode/releases/latest),
+then run **Extensions: Install from VSIX…** and pick the file, or
+`code --install-extension langstage-vscode-<version>.vsix`. Use this for an offline or
+air-gapped machine, or an editor that reaches neither registry.
 
 Every CI run on `main` also builds a `.vsix` (the **`langstage-vscode-vsix`** artifact of
 the [CI workflow](https://github.com/dkedar7/langstage-vscode/actions/workflows/ci.yml?query=branch%3Amain)),
@@ -592,6 +605,25 @@ LANGSTAGE_PYTHON=python npm run record      # re-record docs/assets/panel-demo.{
 npm run watch:webview  # rebuild the panel's webview bundle on change
 npm run package        # build the .vsix
 ```
+
+## Releasing
+
+The extension version lives in `extension/package.json`. Bump it (and the CHANGELOG),
+merge to `main`, then from a clean `main` checkout run:
+
+```bash
+VSCE_PAT="op://kzest/VSCE_PAT/credential" OVSX_PAT="op://kzest/OVSX_PAT/credential" op run -- bash scripts/release-extension.sh
+```
+
+[`scripts/release-extension.sh`](scripts/release-extension.sh) checks the tree is clean
+and on `main`, builds the VSIX (`npm ci && npm run package` in `extension/`), publishes
+it to the VS Code Marketplace (`vsce`) and Open VSX (`ovsx`), and creates the GitHub
+release `extension-v<version>` with the VSIX attached. Each step is skipped when that
+version is already there, so a partly failed run can simply be re-run. `op run` injects
+the tokens from 1Password, so they are never printed. Pass `--dry-run` to build and
+report what would be published without publishing anything (no tokens needed).
+
+The Python sidecar is released separately to PyPI.
 
 ## License
 

@@ -12,6 +12,21 @@
     "Chat",
     "Other"
   ],
+  "keywords": [
+    "langgraph",
+    "langchain",
+    "deepagents",
+    "agent",
+    "ai agent",
+    "ag-ui",
+    "chat",
+    "llm",
+    "langstage"
+  ],
+  "galleryBanner": {
+    "color": "#0B1221",
+    "theme": "dark"
+  },
   "activationEvents": [
     "onView:langstage.chat"
   ],
@@ -168,6 +183,10 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/dkedar7/langstage-vscode"
+  },
+  "homepage": "https://dkedar7.github.io/langstage-docs/",
+  "bugs": {
+    "url": "https://github.com/dkedar7/langstage-vscode/issues"
   },
   "capabilities": {
     "untrustedWorkspaces": {
