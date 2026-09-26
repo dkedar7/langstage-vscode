@@ -1578,8 +1578,6 @@ def main(argv: list[str] | None = None) -> int:
         "Also enabled via LANGSTAGE_DEBUG=1 (the env path for the extension / CI, where you "
         "can't add argv). Off by default - today's terse behavior is 100%% unchanged.",
     )
-    from langstage_vscode import __version__
-
     parser.add_argument(
         "--version",
         action=_VersionAction,
