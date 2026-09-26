@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto';
 import { readLaunchConfig } from '../config';
 import { HostToWebview } from '../shared/panelProtocol';
 import { SidecarClient, sidecarArgs, sidecarEnv } from '../sidecar';
+import { ConversationStore } from './conversationStore';
 import { PanelSession } from './panelSession';
 
 /** The panel's view id (package.json `contributes.views`). */
@@ -18,10 +19,17 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   private view: vscode.WebviewView | undefined;
   private readonly session: PanelSession;
   private readonly subs: vscode.Disposable[] = [];
+  private readonly postListeners = new Set<(msg: HostToWebview) => void>();
 
-  constructor(private readonly extensionUri: vscode.Uri) {
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    storageUri: vscode.Uri | undefined,
+  ) {
     this.session = new PanelSession({
       post: (msg) => this.post(msg),
+      // Per-workspace, per-machine, not synced (build plan M4). No folder open: no
+      // storageUri, and conversations last only as long as the window.
+      store: new ConversationStore(storageUri?.scheme === 'file' ? storageUri.fsPath : undefined),
       createClient: ({ demo }) => {
         const { python, agentSpec, workspace } = readLaunchConfig();
         return new SidecarClient({
@@ -40,7 +48,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   }
 
   static register(context: vscode.ExtensionContext): PanelController {
-    const controller = new PanelController(context.extensionUri);
+    const controller = new PanelController(context.extensionUri, context.storageUri);
     context.subscriptions.push(
       controller,
       vscode.window.registerWebviewViewProvider(VIEW_ID, controller, {
@@ -70,6 +78,24 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     this.session.newConversation();
   }
 
+  /** Whether the webview view has been resolved (it is visible, or was). */
+  get viewResolved(): boolean {
+    return this.view !== undefined;
+  }
+
+  /**
+   * For the editor smoke test (test/electron/): drive the host exactly as the webview
+   * does, and see what the host sends it. Not a public API.
+   */
+  handleForTests(msg: unknown): void {
+    this.session.handle(msg);
+  }
+
+  onDidPostForTests(listener: (msg: HostToWebview) => void): vscode.Disposable {
+    this.postListeners.add(listener);
+    return new vscode.Disposable(() => this.postListeners.delete(listener));
+  }
+
   restartSidecar(): void {
     this.session.restart();
   }
@@ -81,6 +107,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
 
   private post(msg: HostToWebview): void {
     void this.view?.webview.postMessage(msg);
+    for (const l of this.postListeners) l(msg);
   }
 
   /** Links in agent output are untrusted: confirm before opening (ADR 0001, Security). */

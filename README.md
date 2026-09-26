@@ -289,19 +289,42 @@ typo'd flag in a script can't read as a pause.
 
 ### The LangStage panel (preview)
 
-Extension 0.5.0 adds the **LangStage panel**: the extension's own chat view, in the activity
+Extension 0.5.0 added the **LangStage panel**: the extension's own chat view, in the activity
 bar (the LangStage icon), or via **LangStage: Open the LangStage panel** in the command
 palette. It needs nothing but the editor and the sidecar, so it works **with or without
 Copilot**, in VS Code, Cursor, VSCodium, Windsurf and code-server
 ([ADR 0001](docs/adr/0001-standalone-panel.md)).
 
-![The LangStage panel running the keyless demo agent](docs/assets/panel-m2.png)
+![The LangStage panel running the keyless demo agent: a tool card, reasoning, an approval prompt answered with Approve, and the resumed reply](docs/assets/panel-demo.gif)
+
+*Recorded by `npm run record` (`extension/test/record/`): the real panel bundle in the
+webview harness, themed like VS Code's Dark Modern, driven through the real host logic
+against the real sidecar running `--demo=tools`. No Copilot, no API key.*
 
 - Replies stream in as markdown. Each assistant message (`message_id`) is its own block.
 - Tool calls are collapsible cards with the arguments, the result, the status and the
   duration. Reasoning is a collapsed block, apart from the reply. A `write_todos` plan is
   one live **Tasks** checklist at the top, updated in place.
 - **Stop** cancels the turn cooperatively: the agent keeps its memory of the conversation.
+- **Approvals (0.6.0).** When the agent pauses on a human-in-the-loop interrupt, the panel
+  shows an approval card with the action and its arguments, and one button per decision the
+  interrupt allows: **Approve**, **Reject** (with an optional reason), **Respond** (answer in
+  words), **Edit** (the arguments as JSON, checked before sending), and any custom verb the
+  graph advertises. Legacy spellings (`accept`, `ignore`, `response`) work as in core's
+  `normalize_decision`. The sidecar stays the authority: if it refuses an answer, the card
+  stays live and shows why. While a conversation is paused, the message box asks you to
+  answer the request first.
+- **Conversations (0.6.0).** The title at the top opens the conversation list: new (**+**),
+  switch, rename and delete. Each conversation has its own session, so the agent's memory is
+  never shared between them. The sidecar runs one turn at a time, so a message sent in one
+  conversation while another is streaming is shown as *queued* and runs next; **Stop** stops
+  only its own conversation.
+- **Transcripts persist per workspace** (in the extension's workspace storage, on this
+  machine, not synced) and come back after a window reload. The agent process is new after a
+  reload, so the panel marks where its memory stops: *"The agent may not remember the
+  conversation above"*. With the default in-memory checkpointer it doesn't; configure a
+  durable checkpointer to keep memory across restarts. A request that was still waiting for
+  your decision can't be answered after a reload; send a new message instead.
 - The status line shows the sidecar starting, ready, or failed with its startup error. With no
   agent configured it offers **Open settings** and **Try the demo** (the keyless
   `--demo=tools` agent, for that session only).
@@ -310,12 +333,9 @@ Copilot**, in VS Code, Cursor, VSCodium, Windsurf and code-server
   no network port.
 
 The panel runs its own sidecar, separate from the `@langstage` participant's, so the two
-don't share conversations. **Preview limits:** answering a human-in-the-loop interrupt from
-the panel, a conversation list, and transcripts that survive a window reload come in the
-next previews (see the [build plan](docs/plan-standalone-panel.md), M3 and M4). Until then,
-a conversation paused on an interrupt shows the request read-only; start a new conversation
-with **+**. The extension is disabled in untrusted (Restricted Mode) workspaces, because
-running your agent executes workspace code.
+don't share conversations. It is still a **preview**: Marketplace and Open VSX publishing
+come next ([build plan](docs/plan-standalone-panel.md), M6). The extension is disabled in
+untrusted (Restricted Mode) workspaces, because running your agent executes workspace code.
 
 ### For Copilot users: the `@langstage` chat participant
 
@@ -532,7 +552,11 @@ pytest
 cd extension
 npm install
 npm run compile
-npm test               # unit tests: sidecar client, panel host, protocol, webview reducer
+npm test               # unit tests: sidecar client, panel host, store, protocol, webview reducer
+npx playwright install chromium
+LANGSTAGE_PYTHON=python npm run test:e2e    # the panel in Chromium against the real sidecar
+LANGSTAGE_PYTHON=python npm run test:smoke  # the extension in a real VS Code (xvfb-run on Linux)
+LANGSTAGE_PYTHON=python npm run record      # re-record docs/assets/panel-demo.{webm,gif} (needs ffmpeg)
 npm run watch:webview  # rebuild the panel's webview bundle on change
 npm run package        # build the .vsix
 ```

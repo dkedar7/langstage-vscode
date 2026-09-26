@@ -16,7 +16,7 @@ import { ANSWER_COMMAND, disposeParticipantSidecar, handler } from './participan
  * The extension declares `untrustedWorkspaces: { supported: false }`: running the
  * configured agent executes workspace code, so it stays disabled in Restricted Mode.
  */
-export function activate(context: vscode.ExtensionContext) {
+export function activate(context: vscode.ExtensionContext): { panel: PanelController } {
   const panel = PanelController.register(context);
 
   context.subscriptions.push(
@@ -60,6 +60,9 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
   );
+
+  // Returned for the editor smoke test (test/electron/); not a supported API.
+  return { panel };
 }
 
 export function deactivate() {

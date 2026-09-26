@@ -151,6 +151,15 @@ CSS variables (no Tailwind), with a header comment naming the source file and co
 - Config changes (interpreter, agent spec) restart the panel's sidecar. Status shows
   "restarted: conversation memory reset" under the same rule.
 
+*Shipped in extension 0.6.0 (M3–M5).* Deviations: the `in-memory checkpointer` banner is an
+inline note on every restored conversation, worded "may not remember", because
+`--show-config --json` does not report the checkpointer (ADR open question 4); the harness
+relay uses Playwright's page bridge (`exposeFunction` + `postMessage`) instead of a WebSocket
+server; reject / edit / Stop run against a small keyless fixture agent
+(`extension/test/fixtures/hitl_agent.py`) because `--demo=tools` allows only respond and
+approve and finishes too fast to stop; the recording is the harness page, not code-server;
+`panel-e2e` runs on Ubuntu only.
+
 ### M5: tests and recording without Copilot (M, 3–5 d)
 Three layers, all keyless, all driven by the real sidecar `--demo=tools` or recorded fixtures:
 

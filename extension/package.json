@@ -2,7 +2,7 @@
   "name": "langstage-vscode",
   "displayName": "LangStage",
   "description": "Chat with your LangGraph agent in VS Code, Cursor, VSCodium and other VS Code-based editors, with or without Copilot. The VS Code stage of the LangStage family.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "dkedar7",
   "engines": {
     "vscode": "^1.95.0"
@@ -140,16 +140,23 @@
     "watch": "tsc -watch -p ./",
     "watch:webview": "node esbuild.mjs --watch",
     "test": "npm run compile && node esbuild.mjs --tests && node --test \"dist/test/**/*.test.js\"",
+    "test:unit": "npm test",
+    "test:e2e": "playwright test -c playwright.config.ts",
+    "test:smoke": "node test/electron/runTest.js",
+    "record": "playwright test -c test/record/playwright.config.ts",
     "package": "vsce package --no-dependencies",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^20.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/vscode": "^1.95.0",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",
+    "mocha": "^10.8.2",
     "preact": "^10.29.8",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

@@ -9,7 +9,7 @@ export function Chevron({ open }: { open: boolean }) {
 }
 
 export function Spinner() {
-  return <span className="ls-spinner" role="status" aria-label="running" />;
+  return <span className="ls-spinner" role="img" aria-label="running" />;
 }
 
 export function StatusMark({ status }: { status: 'running' | 'success' | 'error' }) {

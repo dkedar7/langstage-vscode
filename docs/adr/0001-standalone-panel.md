@@ -247,6 +247,13 @@ the panel's reducer is the one place to change.
    checkpointer forgets them. The panel should label a restored conversation whose agent
    memory is gone (the planned banner). Should a later `history` command read the
    thread's messages from a durable checkpointer instead?
+   - *M4 (2026-09-26):* the host cannot tell which checkpointer the agent uses:
+     `--show-config --json` does not report it, and only loading the agent would. So the
+     panel marks every restored conversation (and every sidecar restart) with an inline
+     note, worded as a possibility: *"The agent may not remember the conversation above"*,
+     with the durable-checkpointer advice. Reporting the checkpointer in `ready` (next to
+     the planned `version` / `protocol`) would let the panel drop the note when memory is
+     durable.
 5. **Interpreter discovery.** Should the panel offer "Select Python interpreter"? It could
    use the Python extension's API when present; that extension is on Open VSX, but the
    forks' Python tooling varies. Separately, should it offer to `pip install

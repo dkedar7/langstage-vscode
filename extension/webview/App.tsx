@@ -1,6 +1,7 @@
 import { useEffect, useReducer } from 'react';
 import type { HostToWebview } from '../src/shared/panelProtocol';
 import { Composer } from './components/Composer';
+import { ConversationList } from './components/ConversationList';
 import { StatusLine } from './components/StatusLine';
 import { TodoList } from './components/TodoList';
 import { Transcript } from './components/Transcript';
@@ -31,7 +32,7 @@ export function App() {
   return (
     <div className="ls-app">
       <header className="ls-header">
-        <StatusLine status={state.status} />
+        <ConversationList state={state} />
         <button
           type="button"
           className="ls-icon-btn"
@@ -42,13 +43,21 @@ export function App() {
           +
         </button>
       </header>
+      <div className="ls-statusbar">
+        <StatusLine status={state.status} />
+      </div>
       {conv ? (
         <>
           {conv.todos && conv.todos.length > 0 && <TodoList todos={conv.todos} />}
-          <Transcript conv={conv} />
+          <Transcript
+            conv={conv}
+            onDecide={(decisions) => post({ type: 'decide', conversationId: conv.id, decisions })}
+          />
           <Composer
             turn={conv.turn}
-            blockedReason={paused ? 'The agent is paused on the request above.' : undefined}
+            // gh #134: while paused, a new message would not reach the agent (the sidecar
+            // refuses it too); the panel says so instead of sending it.
+            blockedReason={paused ? 'Answer the request above to continue.' : undefined}
             onSend={(text) => post({ type: 'send', conversationId: conv.id, text })}
             onStop={() => post({ type: 'cancel', conversationId: conv.id })}
           />

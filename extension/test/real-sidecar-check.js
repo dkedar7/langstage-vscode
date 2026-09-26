@@ -7,8 +7,7 @@
 //   npm run compile
 //   LANGSTAGE_PYTHON=../.venv/Scripts/python.exe node test/real-sidecar-check.js [--out restore.json]
 //
-// --out writes the final `restore` message (the host's transcript), which the webview
-// harness (test/harness/) replays to render the panel for a screenshot.
+// --out writes the final `restore` message (the host's transcript), for inspection.
 'use strict';
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

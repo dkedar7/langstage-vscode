@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.0] - 2026-09-26
+
+The LangStage panel (still a preview) answers approvals, keeps several conversations and
+remembers them across a window reload, and is now tested end to end without Copilot
+([ADR 0001](docs/adr/0001-standalone-panel.md), build plan milestones M3 to M5). The
+sidecar is unchanged (no protocol change, no Python release).
+
+### Added
+- **Approval card (M3).** A human-in-the-loop interrupt renders as an inline card (ported
+  from the web app's `InterruptDialog`): each requested action with its arguments, and one
+  button per verb in `allowed_decisions`: **Approve**, **Reject** with an optional reason,
+  **Respond** with text, **Edit** with a JSON editor prefilled with the action's arguments
+  (validated before sending; other actions are approved as they are), and a generic button
+  for a custom verb. Decisions are built with `hitl.ts` `buildDecisions`, so the frame's own
+  spelling and core's aliases (`accept`, `ignore`, `response`) carry through.
+  - A decision the sidecar refuses (`error → turn_end`, no `ack`) keeps the card live and
+    shows the error; an accepted one (`ack`) records the answer on the card.
+  - While a conversation is paused, the message box says *Answer the request above to
+    continue* and won't send (the sidecar refuses it too, gh #134).
+- **Conversations (M4).** A conversation list in the panel's header: new, switch, rename,
+  delete. Each conversation has its own `vscode-<uuid>` session id, so agent memory is never
+  shared between conversations. The title is the first line of the first message.
+  - One turn at a time per sidecar: a message sent while another conversation streams is
+    queued by the host and shown as *queued*; Stop stops only its own conversation. Delete
+    is offered only while a conversation has no turn in flight, and removes the transcript
+    only.
+- **Persistence (M4).** Conversations and their transcripts are saved per workspace in the
+  extension's `storageUri` (per machine, not synced; atomic writes; a damaged file loads as
+  empty) and restored on reload. When the sidecar process serving a conversation is
+  replaced (a reload, a restart, a crash), the transcript is marked: *"The agent may not
+  remember the conversation above"*, since an in-memory checkpointer has forgotten it, and a
+  request still awaiting a decision is shown as no longer answerable. With no folder open,
+  conversations last only as long as the window, and the list says so.
+- **Tests without Copilot (M5).**
+  - Playwright (`npm run test:e2e`): the real webview bundle in Chromium, wired through the
+    real host logic (`PanelSession`, `ConversationStore`, `SidecarClient`) to the real
+    sidecar, keyless: streaming, the tool card, reasoning, Approve / Respond / Reject with a
+    reason / Edit JSON, a refused decision, Stop mid-turn, a second conversation queued,
+    rename and delete, restore after a reload, an expired interrupt, no agent → Try the
+    demo, and a bad agent spec. Every run records video.
+  - An editor smoke test (`npm run test:smoke`, `@vscode/test-electron`): the extension
+    activates with the chat API hidden (as in Cursor, VSCodium and code-server), the panel's
+    view resolves, and a `--demo=tools` turn and a new conversation round-trip through the
+    real host.
+  - `npm run record` re-records `docs/assets/panel-demo.webm` and `.gif` from the harness.
+  - CI runs both, on Ubuntu (the smoke test under `xvfb-run`).
+
+### Changed
+- **New conversation** keeps the previous conversations (it used to drop idle ones), and
+  reuses the active conversation if it is still empty.
+- The panel protocol gains a `decision` host message and a `decision` log entry, a `title`
+  on `user`, `persistent` on `restore`, and the host-written `memory_reset` frame.
+
 ## [Extension 0.5.0] - 2026-09-26
 
 The **LangStage panel (preview)**: the extension's own webview chat, which works with or
