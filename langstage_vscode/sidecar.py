@@ -23,6 +23,7 @@ Events (sidecar -> client), one JSON object per line:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from collections import deque
@@ -406,6 +407,13 @@ def run(
             continue
 
         should_cancel = intake.cancel_check(session_id) if enable_cancel else None
+        # gh #106: remember where this session's thread stood before a `message` turn,
+        # so a cancel can roll the thread back instead of leaving the cancelled turn's
+        # human message committed with no reply after it.
+        pre_turn = (
+            _thread_head(agui_agent, session_id)
+            if enable_cancel and agui_message is not None else _NO_ROLLBACK
+        )
         # Keep this turn's interrupt frame, so its allowed_decisions can validate the
         # decision that answers it (gh #117).
         turn_interrupt: list[dict[str, Any]] = []
@@ -424,6 +432,7 @@ def run(
         # #65: otherwise, this turn's interrupt-or-not is the session's new pending
         # state (an interrupt turn leaves it PENDING; anything else clears it).
         if cancelled:
+            _rollback_thread(agui_agent, session_id, pre_turn)
             emit({"type": "cancelled", "session_id": session_id})
             pending_interrupts.pop(session_id, None)
         elif saw_interrupt:
@@ -433,6 +442,79 @@ def run(
         else:
             pending_interrupts.pop(session_id, None)
         emit({"type": "turn_end", "session_id": session_id})
+
+
+def _runtime_versions() -> str:
+    """``langstage-core X, ag-ui-langgraph Y`` for ``--version`` (gh #132): the sidecar
+    is a thin bridge, so most runtime behavior is set by these two packages."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    parts = []
+    for dist in ("langstage-core", "ag-ui-langgraph"):
+        try:
+            parts.append(f"{dist} {version(dist)}")
+        except PackageNotFoundError:
+            parts.append(f"{dist} not installed")
+    return ", ".join(parts)
+
+
+class _VersionAction(argparse.Action):
+    """``--version`` without argparse's line wrapping, so the line stays greppable."""
+
+    def __init__(self, option_strings: Any, dest: str, **kwargs: Any) -> None:
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, **kwargs)
+
+    def __call__(self, parser: Any, namespace: Any, values: Any, option_string: Any = None) -> None:
+        from langstage_vscode import __version__
+
+        safe_write(f"langstage-vscode-sidecar {__version__} ({_runtime_versions()})\n")
+        parser.exit()
+
+
+# ``_thread_head`` result meaning "don't roll back": the turn is not a cancellable
+# ``message`` turn, or the checkpointer can't be read synchronously.
+_NO_ROLLBACK = object()
+
+
+def _thread_head(agent: Any, session_id: str) -> Any:
+    """The session thread's latest checkpoint config before a turn (gh #106).
+
+    Returns the checkpoint's config (it carries ``checkpoint_id``), ``None`` when the
+    thread has no checkpoint yet, or ``_NO_ROLLBACK`` when the state can't be read
+    here (no graph, or an async-only checkpointer that has no sync ``get_state``)."""
+    graph = getattr(agent, "graph", None)
+    if graph is None or getattr(graph, "checkpointer", None) is None:
+        return _NO_ROLLBACK
+    try:
+        snap = graph.get_state({"configurable": {"thread_id": session_id}})
+    except Exception:  # noqa: BLE001 — e.g. an async-only saver; skip the rollback
+        return _NO_ROLLBACK
+    cfg = getattr(snap, "config", None) or {}
+    return cfg if cfg.get("configurable", {}).get("checkpoint_id") else None
+
+
+def _rollback_thread(agent: Any, session_id: str, head: Any) -> None:
+    """Undo a cancelled ``message`` turn's writes to the session thread (gh #106).
+
+    A cancel aborts the turn after LangGraph has committed its input, so the thread
+    kept the human message with no reply after it, and the next turn saw two human
+    messages in a row. This puts the thread back where it was before the turn: it
+    forks the pre-turn checkpoint to the head of the thread (LangGraph's
+    ``update_state(..., as_node="__copy__")``) or, if the thread was empty, deletes it.
+    Best effort: when the state can't be restored the thread is left as it was, which
+    is the old behavior."""
+    if head is _NO_ROLLBACK:
+        return
+    graph = agent.graph
+    try:
+        if head is None:
+            graph.checkpointer.delete_thread(session_id)
+        else:
+            graph.update_state(head, None, as_node="__copy__")
+    except Exception as exc:  # noqa: BLE001 — never let a rollback break the command loop
+        import sys
+
+        safe_write(f"note: could not roll back the cancelled turn: {exc}\n", sys.stderr)
 
 
 def _run_turn_agui(
@@ -1437,7 +1519,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Run a built-in keyless demo agent (no API key needed). Bare --demo "
         "serves the echo stub; --demo=tools serves the rich-frame demo that exercises "
-        "tool_start/tool_end/extraction/reasoning/interrupt.",
+        "tool_start/tool_end/extraction/reasoning/interrupt. Those frames appear only when "
+        "the message contains a trigger phrase: 'use a tool' (tool_start/tool_end/"
+        "extraction), 'think' (reasoning) or 'ask me' (interrupt); any other message is "
+        "echoed.",
     )
     parser.add_argument(
         "--show-config",
@@ -1493,13 +1578,11 @@ def main(argv: list[str] | None = None) -> int:
         "Also enabled via LANGSTAGE_DEBUG=1 (the env path for the extension / CI, where you "
         "can't add argv). Off by default - today's terse behavior is 100%% unchanged.",
     )
-    from langstage_vscode import __version__
-
     parser.add_argument(
         "--version",
-        action="version",
-        version=f"langstage-vscode-sidecar {__version__}",
-        help="Print the version and exit.",
+        action=_VersionAction,
+        help="Print the version, and the langstage-core / ag-ui-langgraph runtime it "
+        "runs on, and exit.",
     )
     # Removed in 0.5.0 (AG-UI is the only streaming path now, ADR 0003), but the
     # 0.5.0 CHANGELOG promised --agui would be *accepted-and-ignored* so existing

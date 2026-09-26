@@ -32,11 +32,8 @@ It has two parts in one repo:
 └──────────────────────────────────────────────────┘
 ```
 
-> **Status: early.** The extension is not yet on the VS Code Marketplace (run
-> it from source for now), and interactive approval of human-in-the-loop
-> interrupts is not wired into the chat UI yet (the sidecar already supports
-> the round-trip, and [`--repl`](#configure) can drive it end to end from the
-> CLI).
+> **Status: early.** The extension is not yet on the VS Code Marketplace: install
+> the `.vsix` that CI builds (see [Install](#extension)), or run it from source.
 
 ## Every stage for your LangGraph agent
 
@@ -80,16 +77,28 @@ Pass **`--demo=tools`** for the rich-frame demo that exercises
 rendering surface, without an agent or API key (parity with `langstage-agui
 --demo=tools`).
 
-### Extension (from source, until it's on the Marketplace)
+### Extension
+
+The extension is not on the Marketplace yet. Every CI run builds an installable
+`.vsix`: open the latest [CI run on `main`](https://github.com/dkedar7/langstage-vscode/actions/workflows/ci.yml?query=branch%3Amain),
+download the **`langstage-vscode-vsix`** artifact, unzip it, and install it (VS Code
+1.95 or newer):
+
+```bash
+code --install-extension langstage-vscode-<version>.vsix
+```
+
+Or build the same file yourself:
 
 ```bash
 cd extension
 npm install
-npm run compile
+npm run package        # writes langstage-vscode-<version>.vsix
 ```
 
-Then press **F5** in VS Code (with the `extension/` folder open) to launch an
-Extension Development Host with `@langstage` available.
+To work on the extension, run `npm run compile` and press **F5** in VS Code (with the
+`extension/` folder open) to launch an Extension Development Host with `@langstage`
+available.
 
 ## Configure
 
@@ -134,8 +143,8 @@ runnable graph, drives one turn, and exits `0` (healthy) / non-zero with a preci
 message (add `--json` for a machine-readable verdict). If that turn pauses on a
 human-in-the-loop interrupt instead of replying, the verdict is `PAUSED:` (`"ok": false,
 "interrupt": true` in `--json`) with exit `2`, the code `--message` uses for a pause.
-Interactive approval is not wired into the chat UI yet, so such an agent would wait on its
-first `@langstage` turn:
+In the chat, such an agent asks for your decision on its first `@langstage` turn (see
+[Answering an interrupt](#answering-an-interrupt-from-the-chat)):
 
 ```bash
 langstage-vscode-sidecar --selfcheck                       # validate the runtime via the demo stub
@@ -270,6 +279,35 @@ Open the chat panel and start a message with `@langstage`:
 The extension streams the agent's content, tool calls, reasoning, and todo
 updates (a `write_todos` call renders as a **Tasks** checklist) into the chat response.
 
+### Answering an interrupt from the chat
+
+When the agent pauses on a human-in-the-loop interrupt (a `HumanInTheLoopMiddleware`
+approval, or any `interrupt(...)`), the response shows what it wants to do (each action,
+its description, and its arguments) and a button for each decision the interrupt allows:
+
+| Button | Same as typing | Sends |
+|---|---|---|
+| **Approve** | `@langstage /approve` | `{"type": "approve"}` |
+| **Reject** | `@langstage /reject [reason]` | `{"type": "reject"}`, plus `"message"` if you give a reason |
+| **Respond…** | `@langstage /respond <text>` | `{"type": "respond", "message": "<text>"}` |
+| **Edit…** | `@langstage /edit <json>` | the JSON object merged into `{"type": "edit"}`, e.g. `{"edited_action": {"name": "...", "args": {...}}}` |
+
+**Approve** and **Reject** send at once. **Respond…** and **Edit…** put the command in
+the chat input so you can type the text. The answer is a `decision` on the same
+conversation's session, and the resumed turn streams into the chat like any other reply.
+
+- Only the verbs in the interrupt's `allowed_decisions` get a button, and a command for
+  any other verb is refused before it is sent. The sidecar checks every decision again
+  with langstage-core's `normalize_decision`. A legacy interrupt that lists `accept`,
+  `ignore` or `response` is answered with that spelling. A custom verb has no button; it
+  is listed and can be answered from `--repl`.
+- An interrupt that asks about several actions at once gets the same decision for each.
+- While the agent is paused, a plain message is not sent (it could not reach the agent).
+  The chat shows the buttons again instead.
+- The pending interrupt lives in the sidecar process. If that process restarts (a
+  settings change, a reload) before you answer, the decision is refused with
+  `no interrupt pending`; start a new message.
+
 ## Sidecar protocol
 
 The extension talks to the sidecar over newline-delimited JSON. You can drive it
@@ -318,7 +356,11 @@ interrupt the verb unchanged.
 A **`cancel`** stops the turn currently streaming for that `session_id` **cooperatively** —
 it emits a distinct `cancelled` frame (neither `complete` nor `error`) then `turn_end`, and
 **leaves the process, the session, and its in-process checkpointer alive**, so the next
-`message` on the same `session_id` resumes with memory intact. That is the difference from
+`message` on the same `session_id` resumes with memory intact. A cancelled `message` turn
+is also rolled back (gh #106): the thread returns to its checkpoint from before that turn,
+so the cancelled prompt doesn't stay in the agent's history with no reply after it. (This
+needs a checkpointer the sidecar can read synchronously, such as the default in-memory
+one. With an async-only checkpointer the thread is left as it was.) That is the difference from
 killing the sidecar to stop a turn, which throws the conversation's memory away. A `cancel`
 with no turn in flight for the session is answered with an `error` frame
 (`no turn in progress for session '…'`), consistent with the `decision`/`message` guards.
@@ -440,6 +482,8 @@ pytest
 cd extension
 npm install
 npm run compile
+npm test               # unit tests for the chat's interrupt handling (node --test)
+npm run package        # build the .vsix
 ```
 
 ## License
