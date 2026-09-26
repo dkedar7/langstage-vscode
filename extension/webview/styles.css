@@ -39,9 +39,46 @@ code, pre { font-family: var(--ls-mono); font-size: 0.92em; }
 
 /* ---------------------------------------------------------------- header / status */
 .ls-header {
-  display: flex; align-items: flex-start; gap: 6px;
-  padding: 6px 10px; border-bottom: 1px solid var(--ls-border);
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-bottom: 1px solid var(--ls-border); position: relative;
 }
+.ls-statusbar { padding: 4px 10px; border-bottom: 1px solid var(--ls-border); }
+
+/* ---------------------------------------------------------------- conversations */
+.ls-convs { flex: 1; min-width: 0; }
+.ls-convs-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 2px 4px;
+  border: none; border-radius: 3px; background: none; cursor: pointer; font-weight: 600; text-align: left;
+}
+.ls-convs-toggle:hover { background: var(--ls-hover); }
+.ls-convs-count {
+  flex: none; font-weight: normal; font-size: 0.85em; color: var(--ls-muted);
+  border: 1px solid var(--ls-border); border-radius: 8px; padding: 0 6px;
+}
+.ls-convs-list {
+  position: absolute; left: 6px; right: 6px; top: 100%; z-index: 10; margin: 2px 0 0; padding: 4px;
+  list-style: none; max-height: 50vh; overflow-y: auto;
+  background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--ls-bg)));
+  border: 1px solid var(--ls-border); border-radius: 4px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.ls-conv { display: flex; align-items: center; gap: 4px; border-radius: 3px; }
+.ls-conv:hover { background: var(--ls-hover); }
+.ls-conv-active { background: var(--vscode-list-inactiveSelectionBackground, var(--ls-hover)); }
+.ls-conv-title {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 3px 6px;
+  border: none; background: none; cursor: pointer; text-align: left;
+}
+.ls-conv-action { font-size: 13px; opacity: 0.7; }
+.ls-conv-action:hover:not(:disabled) { opacity: 1; }
+.ls-conv-action:disabled { opacity: 0.3; cursor: default; }
+.ls-conv-flag { flex: none; font-size: 0.8em; color: var(--ls-warn); }
+.ls-conv-rename {
+  flex: 1; margin: 2px; padding: 2px 6px; font: inherit;
+  background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+  border: 1px solid var(--ls-accent); border-radius: 3px;
+}
+.ls-convs-note { padding: 4px 6px; }
+.ls-btn-small { padding: 0 8px; font-size: 0.9em; }
 .ls-status { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 0.92em; color: var(--ls-muted); }
 .ls-status-failed { flex-direction: column; align-items: stretch; gap: 6px; color: var(--ls-fg); }
 .ls-status-row { display: flex; align-items: center; gap: 6px; }
@@ -176,6 +213,25 @@ code, pre { font-family: var(--ls-mono); font-size: 0.92em; }
   display: flex; flex-direction: column; gap: 4px;
 }
 .ls-interrupt-title { font-weight: 600; }
+.ls-interrupt:not(.ls-interrupt-live) { border-color: var(--ls-border); background: var(--ls-surface); }
+.ls-interrupt-action-head { display: flex; align-items: center; gap: 8px; }
+.ls-interrupt-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.ls-interrupt-form { display: flex; flex-direction: column; gap: 4px; }
+.ls-interrupt-form textarea {
+  width: 100%; resize: vertical; font: inherit; padding: 4px 6px;
+  background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--ls-border)); border-radius: 3px;
+}
+.ls-interrupt-form textarea.ls-json { font-family: var(--ls-mono); font-size: 0.92em; }
+.ls-interrupt-form textarea:focus { outline: 1px solid var(--ls-accent); outline-offset: -1px; }
+.ls-interrupt-refused {
+  border-left: 3px solid var(--ls-bad); padding: 2px 0 2px 8px;
+}
+.ls-interrupt-answer { display: flex; align-items: center; gap: 6px; font-size: 0.92em; color: var(--ls-muted); }
+.ls-memory-reset {
+  border: 1px dashed var(--ls-warn); border-radius: 4px; padding: 6px 10px; font-size: 0.92em;
+  background: color-mix(in srgb, var(--ls-warn) 6%, transparent);
+}
 .ls-error {
   border: 1px solid var(--vscode-inputValidation-errorBorder, var(--ls-bad)); border-radius: 4px;
   background: var(--vscode-inputValidation-errorBackground, color-mix(in srgb, var(--ls-bad) 10%, transparent));

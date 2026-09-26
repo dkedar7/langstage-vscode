@@ -10,3 +10,6 @@ dist/
 extension/node_modules/
 extension/dist/
 *.vsix
+extension/test-results/
+extension/playwright-report/
+extension/.vscode-test/

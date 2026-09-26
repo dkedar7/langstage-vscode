@@ -217,13 +217,15 @@ test('restore from the host log renders the same transcript as the live frames',
   assert.deepEqual(strip(replay.conversations[C]), strip(live.conversations[C]));
 });
 
-test('restore keeps a turn in flight streaming; pendingInterrupt only when idle', () => {
+test('restore keeps a turn in flight streaming; an interrupt stays pending until an ack', () => {
   const s = restored([{ kind: 'frame', frame: { type: 'content', content: 'x', message_id: 'm' } }], { [C]: 'running' });
   const it = s.conversations[C].items[0];
   assert.ok(it.kind === 'assistant' && it.streaming);
 
   const paused = restored([{ kind: 'frame', frame: { type: 'interrupt', allowed_decisions: ['approve'] } }]);
-  assert.equal(pendingInterrupt(paused.conversations[C])?.type, 'interrupt');
+  assert.equal(pendingInterrupt(paused.conversations[C])?.frame.type, 'interrupt');
   const busy = reduce(paused, { v: 1, type: 'turn/started', conversationId: C });
-  assert.equal(pendingInterrupt(busy.conversations[C]), undefined);
+  assert.ok(pendingInterrupt(busy.conversations[C]), 'still pending while the answer is in flight');
+  const acked = reduce(busy, { v: 1, type: 'frame', conversationId: C, frame: { type: 'ack', ref: 'decision' } });
+  assert.equal(pendingInterrupt(acked.conversations[C]), undefined);
 });

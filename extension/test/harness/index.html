@@ -1,10 +1,14 @@
 <!DOCTYPE html>
 <!--
-  Webview harness (build plan M5, first cut): the panel's real bundle, dist/webview/main.js,
-  in a plain page. `acquireVsCodeApi()` is stubbed: `ui/ready` is answered with the
-  `restore` message in restore.js (written by screenshot.js from a real-sidecar run), and
-  everything the UI posts is kept in window.__sent. The --vscode-* variables below are
-  VS Code's Dark Modern values, so it looks like the editor. Test-only; not in the VSIX.
+  Webview harness (build plan M5): the panel's real bundle, dist/webview/main.js, in a
+  plain page, driven against the REAL sidecar. `acquireVsCodeApi()` is stubbed: what the
+  UI posts goes to `window.__toHost`, which relay.ts binds (Playwright exposeFunction) to
+  the real PanelSession + SidecarClient host logic in the test process; the host's
+  messages come back through window.postMessage, exactly as VS Code delivers them.
+  Everything the UI posts is also kept in window.__sent.
+
+  The --vscode-* variables below are VS Code's Dark Modern values, so it looks like the
+  editor. Test-only; not in the VSIX.
 -->
 <html lang="en">
 <head>
@@ -13,18 +17,20 @@
 <link rel="stylesheet" href="../../dist/webview/main.css">
 <style>
   :root {
-    --vscode-font-family: "Segoe UI", system-ui, sans-serif;
+    --vscode-font-family: "Segoe UI", system-ui, -apple-system, "Ubuntu", "Droid Sans", sans-serif;
     --vscode-font-size: 13px;
-    --vscode-editor-font-family: Consolas, "Courier New", monospace;
+    --vscode-editor-font-family: Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     --vscode-foreground: #cccccc;
     --vscode-descriptionForeground: #9d9d9d;
     --vscode-sideBar-background: #181818;
     --vscode-editor-background: #1f1f1f;
     --vscode-editorWidget-background: #202020;
+    --vscode-quickInput-background: #222222;
     --vscode-widget-border: #313131;
     --vscode-panel-border: #2b2b2b;
     --vscode-textCodeBlock-background: #2b2b2b;
     --vscode-list-hoverBackground: #2a2d2e;
+    --vscode-list-inactiveSelectionBackground: #37373d;
     --vscode-testing-iconPassed: #73c991;
     --vscode-errorForeground: #f85149;
     --vscode-editorWarning-foreground: #cca700;
@@ -50,15 +56,12 @@
 </head>
 <body>
 <div id="root"></div>
-<script src="restore.js"></script>
 <script>
   window.__sent = [];
   window.acquireVsCodeApi = () => ({
     postMessage(m) {
       window.__sent.push(m);
-      if (m.type === 'ui/ready' && window.__RESTORE__) {
-        setTimeout(() => window.postMessage(window.__RESTORE__, '*'));
-      }
+      if (window.__toHost) window.__toHost(m);
     },
     getState() { return undefined; },
     setState() {},

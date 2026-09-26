@@ -40,9 +40,32 @@ export type Item =
   | { kind: 'assistant'; key: number; messageId?: string; text: string; streaming: boolean }
   | { kind: 'reasoning'; key: number; text: string; streaming: boolean }
   | ToolItem
-  | { kind: 'interrupt'; key: number; frame: Frame }
+  | InterruptItem
   | { kind: 'error'; key: number; error: string; traceback?: string; host: boolean }
-  | { kind: 'notice'; key: number; text: string };
+  | { kind: 'notice'; key: number; text: string }
+  /** The sidecar serving this conversation was replaced: its memory stops here. */
+  | { kind: 'memoryReset'; key: number };
+
+export interface InterruptItem {
+  kind: 'interrupt';
+  key: number;
+  frame: Frame;
+  /** How it was answered, once the sidecar accepted the decision (`ack`). */
+  answer?: Array<Record<string, unknown>>;
+  /** The agent restarted before it was answered: it can no longer be. */
+  expired?: boolean;
+}
+
+/** The interrupt a conversation is paused on (M3). */
+export interface Pending {
+  /** The `key` of its interrupt item. */
+  key: number;
+  frame: Frame;
+  /** The decision on its way to the sidecar, until `ack` (accepted) or `error` (refused). */
+  sent?: Array<Record<string, unknown>>;
+  /** The sidecar refused the last answer (`error → turn_end`, no `ack`); still pending. */
+  error?: string;
+}
 
 export type TurnPhase = 'idle' | 'queued' | 'running';
 
@@ -53,6 +76,8 @@ export interface ConversationView {
   /** The live checklist from the latest `todos` extraction, updated in place. */
   todos: TodoItem[] | null;
   turn: TurnPhase;
+  /** Set by an `interrupt` frame; cleared once the sidecar accepts a command (`ack`). */
+  pending?: Pending;
   nextKey: number;
 }
 
@@ -61,6 +86,8 @@ export interface PanelState {
   order: string[];
   activeId: string | undefined;
   status: PanelStatus;
+  /** Transcripts survive a window reload (workspace storage). */
+  persistent: boolean;
 }
 
 export const initialState: PanelState = {
@@ -68,6 +95,7 @@ export const initialState: PanelState = {
   order: [],
   activeId: undefined,
   status: { phase: 'idle' },
+  persistent: false,
 };
 
 export function emptyConversation(info: ConversationInfo): ConversationView {
@@ -86,18 +114,28 @@ export function reduce(state: PanelState, msg: HostToWebview): PanelState {
         conv = turn ? { ...conv, turn } : settle(conv);
         conversations[info.id] = conv;
       }
+      // Newest first, for the conversation list.
+      const order = msg.conversations
+        .map((c, i) => ({ id: c.id, at: c.updatedAt ?? 0, i }))
+        .sort((a, b) => b.at - a.at || b.i - a.i)
+        .map((c) => c.id);
       return {
         conversations,
-        order: msg.conversations.map((c) => c.id),
+        order,
         activeId: msg.activeId,
         status: msg.status,
+        persistent: msg.persistent ?? false,
       };
     }
     case 'status':
       return { ...state, status: msg.status };
     case 'user':
       return update(state, msg.conversationId, (c) =>
-        reduceLogEntry(c, { kind: 'user', text: msg.text, at: msg.at }),
+        reduceLogEntry(msg.title ? { ...c, title: msg.title } : c, { kind: 'user', text: msg.text, at: msg.at }),
+      );
+    case 'decision':
+      return update(state, msg.conversationId, (c) =>
+        reduceLogEntry(c, { kind: 'decision', decisions: msg.decisions, at: msg.at }),
       );
     case 'frame':
       return update(state, msg.conversationId, (c) => reduceFrame(c, msg.frame));
@@ -106,7 +144,7 @@ export function reduce(state: PanelState, msg: HostToWebview): PanelState {
     case 'turn/started':
       return update(state, msg.conversationId, (c) => ({ ...c, turn: 'running' }));
     case 'turn/ended':
-      return update(state, msg.conversationId, (c) => settle({ ...c, turn: 'idle' }));
+      return update(state, msg.conversationId, (c) => unsend(settle({ ...c, turn: 'idle' })));
     default:
       return state;
   }
@@ -126,6 +164,12 @@ function update(
 export function reduceLogEntry(conv: ConversationView, entry: LogEntry): ConversationView {
   if (entry.kind === 'user') {
     return push(conv, { kind: 'user', key: 0, text: entry.text, at: entry.at });
+  }
+  if (entry.kind === 'decision') {
+    // Shown on the card once accepted; until then the card says it is being sent.
+    return conv.pending
+      ? { ...conv, pending: { ...conv.pending, sent: entry.decisions, error: undefined } }
+      : conv;
   }
   return reduceFrame(conv, entry.frame);
 }
@@ -240,10 +284,39 @@ export function reduceFrame(conv: ConversationView, frame: Frame): ConversationV
       }
       return next;
     }
-    case 'interrupt':
-      return push(conv, { kind: 'interrupt', key: 0, frame });
+    case 'ack': {
+      // The sidecar accepted a command, so nothing is pending any more: a decision
+      // resumed the agent (record it on its card).
+      const p = conv.pending;
+      if (!p) return conv;
+      const items = p.sent
+        ? conv.items.map((it) => (it.kind === 'interrupt' && it.key === p.key ? { ...it, answer: p.sent } : it))
+        : conv.items;
+      return { ...conv, items, pending: undefined };
+    }
+    case 'interrupt': {
+      const next = push(conv, { kind: 'interrupt', key: 0, frame });
+      return { ...next, pending: { key: conv.nextKey, frame } };
+    }
+    case 'memory_reset': {
+      // The sidecar was replaced: an unanswered interrupt died with it.
+      const p = conv.pending;
+      const items = p
+        ? conv.items.map((it) => (it.kind === 'interrupt' && it.key === p.key ? { ...it, expired: true } : it))
+        : conv.items;
+      return push({ ...conv, items, pending: undefined }, { kind: 'memoryReset', key: 0 });
+    }
     case 'error':
-      return push(conv, {
+      // The sidecar refused what answered the pending interrupt (gh #117 / #134):
+      // `error → turn_end` with no `ack`. The interrupt stays pending, so the card
+      // stays live and shows why.
+      if (conv.pending && frame.source !== 'panel') {
+        return {
+          ...conv,
+          pending: { ...conv.pending, sent: undefined, error: asString(frame.error) ?? 'refused' },
+        };
+      }
+      return push(unsend(conv), {
         kind: 'error',
         key: 0,
         error: asString(frame.error) ?? 'unknown error',
@@ -251,14 +324,20 @@ export function reduceFrame(conv: ConversationView, frame: Frame): ConversationV
         host: frame.source === 'panel',
       });
     case 'cancelled':
-      return push(settle(conv), { kind: 'notice', key: 0, text: 'Stopped.' });
+      return push(unsend(settle(conv)), { kind: 'notice', key: 0, text: 'Stopped.' });
     case 'complete':
-    case 'turn_end':
       return settle(conv);
+    case 'turn_end':
+      return unsend(settle(conv));
     default:
       // ack, ready, usage and anything newer: nothing to render.
       return conv;
   }
+}
+
+/** A turn ended without the sidecar accepting the decision in flight: it wasn't sent. */
+function unsend(conv: ConversationView): ConversationView {
+  return conv.pending?.sent ? { ...conv, pending: { ...conv.pending, sent: undefined } } : conv;
 }
 
 /** Todos from a `todos` extraction: a list, or `{todos: [...]}`; items may use `task`/`done`. */
@@ -283,11 +362,9 @@ export function normalizeTodos(data: unknown): TodoItem[] {
   });
 }
 
-/** The interrupt the conversation is paused on: its last item, with no turn running. */
-export function pendingInterrupt(conv: ConversationView | undefined): Frame | undefined {
-  if (!conv || conv.turn !== 'idle') return undefined;
-  const last = conv.items[conv.items.length - 1];
-  return last?.kind === 'interrupt' ? last.frame : undefined;
+/** The interrupt the conversation is paused on, if any. */
+export function pendingInterrupt(conv: ConversationView | undefined): Pending | undefined {
+  return conv?.pending;
 }
 
 function stringify(x: unknown): string {

@@ -69,3 +69,68 @@ jobs:
           name: langstage-vscode-vsix
           path: extension/*.vsix
           if-no-files-found: error
+
+  # The panel end to end without Copilot or an API key (build plan M5): the real webview
+  # bundle in Chromium, the real host logic and the real sidecar (`--demo=tools` plus a
+  # keyless fixture agent). Every test records video, kept as an artifact.
+  panel-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    env:
+      LANGSTAGE_PYTHON: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v3
+      - name: Install the sidecar
+        run: uv pip install --system ..
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run compile
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      # The README demo, re-recorded from this run (informative; the tests are the gate).
+      - name: Record the panel demo
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends ffmpeg >/dev/null
+          npm run record
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panel-e2e-videos
+          path: |
+            extension/test-results/
+            extension/playwright-report/
+            docs/assets/panel-demo.*
+          if-no-files-found: ignore
+
+  # The extension in a real VS Code (@vscode/test-electron): activation with the chat API
+  # hidden, the panel's view resolving, and a --demo turn through the real host.
+  editor-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    env:
+      LANGSTAGE_PYTHON: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v3
+      - name: Install the sidecar
+        run: uv pip install --system ..
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run compile
+      - run: xvfb-run -a npm run test:smoke

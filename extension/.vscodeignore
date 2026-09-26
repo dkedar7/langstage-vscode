@@ -8,3 +8,6 @@ tsconfig.json
 esbuild.mjs
 node_modules/**
 test/**
+test-results/**
+playwright-report/**
+.vscode-test/**

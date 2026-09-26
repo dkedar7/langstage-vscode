@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react';
 import type { ConversationView } from '../state/reducer';
 import { ErrorBlock } from './ErrorBlock';
-import { InterruptNotice } from './InterruptNotice';
+import { InterruptCard } from './InterruptCard';
 import { AssistantMessage, UserMessage } from './Message';
 import { ReasoningBlock } from './ReasoningBlock';
 import { ToolCard } from './ToolCard';
@@ -18,7 +18,13 @@ function firstReplyOfTurn(conv: ConversationView, index: number): boolean {
   return true;
 }
 
-export function Transcript({ conv }: { conv: ConversationView }) {
+export function Transcript({
+  conv,
+  onDecide,
+}: {
+  conv: ConversationView;
+  onDecide: (decisions: Array<Record<string, unknown>>) => void;
+}) {
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -67,11 +73,21 @@ export function Transcript({ conv }: { conv: ConversationView }) {
             return <ToolCard key={item.key} tool={item} />;
           case 'interrupt':
             return (
-              <InterruptNotice
+              <InterruptCard
                 key={item.key}
-                frame={item.frame}
-                pending={conv.turn === 'idle' && i === conv.items.length - 1}
+                item={item}
+                pending={conv.pending?.key === item.key ? conv.pending : undefined}
+                busy={conv.turn !== 'idle'}
+                onDecide={onDecide}
               />
+            );
+          case 'memoryReset':
+            return (
+              <div key={item.key} className="ls-memory-reset" role="note">
+                <strong>The agent may not remember the conversation above.</strong> Its process
+                restarted, and with the default in-memory checkpointer its memory went with it.
+                Configure a durable checkpointer to keep memory across restarts.
+              </div>
             );
           case 'error':
             return <ErrorBlock key={item.key} error={item.error} traceback={item.traceback} host={item.host} />;

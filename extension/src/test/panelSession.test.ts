@@ -133,19 +133,28 @@ test('a startup failure shows in the status (noAgent) and the transcript; tryDem
   session.dispose();
 });
 
-test('conversation/new mints a fresh session id', async () => {
+test('conversation/new mints a fresh session id and keeps the old conversation', async () => {
   const { session, posted, procs } = setup();
   session.handle({ v: 1, type: 'ui/ready' });
   procs[0].emitFrames([{ type: 'ready' }]);
   await tick();
   const first = restoreOf(posted).activeId;
+  // An empty active conversation is reused rather than piling up blank ones.
+  session.handle({ v: 1, type: 'conversation/new' });
+  assert.equal(restoreOf(posted).activeId, first);
+
+  session.handle({ v: 1, type: 'send', conversationId: first, text: 'one' });
+  await tick();
+  procs[0].emitFrames([{ type: 'ack', ref: 'message' }, { type: 'turn_end', session_id: 'x' }]);
+  await tick();
   session.handle({ v: 1, type: 'conversation/new' });
   const r = restoreOf(posted);
   assert.notEqual(r.activeId, first);
-  assert.equal(r.conversations.length, 1, 'the idle, unreachable conversation is dropped');
-  session.handle({ v: 1, type: 'send', conversationId: first, text: 'to a dropped conversation' });
+  assert.equal(r.conversations.length, 2);
+  session.handle({ v: 1, type: 'send', conversationId: r.activeId, text: 'two' });
   await tick();
-  assert.equal(procs[0].commands.length, 0);
+  const [a, b] = procs[0].commands;
+  assert.notEqual(a.session_id, b.session_id, 'never share agent memory across conversations');
   session.dispose();
 });
 

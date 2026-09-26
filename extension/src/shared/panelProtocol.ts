@@ -17,8 +17,23 @@ export interface Frame {
   [key: string]: unknown;
 }
 
-/** One entry of a conversation's transcript log: what the user sent, or a frame. */
-export type LogEntry = { kind: 'user'; text: string; at?: number } | { kind: 'frame'; frame: Frame };
+/**
+ * One entry of a conversation's transcript log: what the user sent, the decision they
+ * gave an interrupt, or a frame.
+ *
+ * Besides the sidecar's own frames, the host writes a few of its own, marked
+ * `source: 'panel'`: `error` (the sidecar couldn't start or died mid-turn), `cancelled`
+ * (a queued turn was stopped before it reached the sidecar) and `memory_reset` (the
+ * sidecar process serving this conversation was replaced, so an in-memory checkpointer
+ * no longer holds what came before, and any pending interrupt is gone with it).
+ */
+export type LogEntry =
+  | { kind: 'user'; text: string; at?: number }
+  | { kind: 'decision'; decisions: Array<Record<string, unknown>>; at?: number }
+  | { kind: 'frame'; frame: Frame };
+
+/** The host-written frame that marks a replaced sidecar (see `LogEntry`). */
+export const MEMORY_RESET_FRAME: Frame = { type: 'memory_reset', source: 'panel' };
 
 export type SidecarPhase = 'idle' | 'starting' | 'ready' | 'failed' | 'stopped';
 
@@ -38,6 +53,8 @@ export interface PanelStatus {
 export interface ConversationInfo {
   id: string;
   title: string;
+  /** Last activity (ms since the epoch), for the conversation list. */
+  updatedAt?: number;
 }
 
 // ---------------------------------------------------------------- webview → host
@@ -69,8 +86,19 @@ export type HostToWebview =
       /** Conversations with a turn in flight or queued. */
       turns: Record<string, 'queued' | 'running'>;
       status: PanelStatus;
+      /** Transcripts are saved in workspace storage (false: no folder open, memory only). */
+      persistent?: boolean;
     }
-  | { v: 1; type: 'user'; conversationId: string; text: string; at: number }
+  | {
+      v: 1;
+      type: 'user';
+      conversationId: string;
+      text: string;
+      at: number;
+      /** The conversation's new title, when this first message named it. */
+      title?: string;
+    }
+  | { v: 1; type: 'decision'; conversationId: string; decisions: Array<Record<string, unknown>>; at: number }
   | { v: 1; type: 'frame'; conversationId: string; frame: Frame }
   | { v: 1; type: 'turn/queued'; conversationId: string }
   | { v: 1; type: 'turn/started'; conversationId: string }
@@ -101,7 +129,10 @@ export function parseWebviewMessage(raw: unknown): WebviewToHost | undefined {
     case 'decide':
       return str(m.conversationId) &&
         Array.isArray(m.decisions) &&
-        m.decisions.every((d) => d && typeof d === 'object' && !Array.isArray(d))
+        m.decisions.length > 0 &&
+        m.decisions.every(
+          (d) => d && typeof d === 'object' && !Array.isArray(d) && str((d as { type?: unknown }).type),
+        )
         ? {
             v: 1,
             type: 'decide',
