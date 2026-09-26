@@ -97,8 +97,8 @@ npm run package        # writes langstage-vscode-<version>.vsix
 ```
 
 To work on the extension, run `npm run compile` and press **F5** in VS Code (with the
-`extension/` folder open) to launch an Extension Development Host with `@langstage`
-available.
+`extension/` folder open) to launch an Extension Development Host with the LangStage panel (and `@langstage`, where
+the chat view exists) available.
 
 ## Configure
 
@@ -287,7 +287,40 @@ typo'd flag in a script can't read as a pause.
 
 ## Usage
 
-Open the chat panel and start a message with `@langstage`:
+### The LangStage panel (preview)
+
+Extension 0.5.0 adds the **LangStage panel**: the extension's own chat view, in the activity
+bar (the LangStage icon), or via **LangStage: Open the LangStage panel** in the command
+palette. It needs nothing but the editor and the sidecar, so it works **with or without
+Copilot**, in VS Code, Cursor, VSCodium, Windsurf and code-server
+([ADR 0001](docs/adr/0001-standalone-panel.md)).
+
+![The LangStage panel running the keyless demo agent](docs/assets/panel-m2.png)
+
+- Replies stream in as markdown. Each assistant message (`message_id`) is its own block.
+- Tool calls are collapsible cards with the arguments, the result, the status and the
+  duration. Reasoning is a collapsed block, apart from the reply. A `write_todos` plan is
+  one live **Tasks** checklist at the top, updated in place.
+- **Stop** cancels the turn cooperatively: the agent keeps its memory of the conversation.
+- The status line shows the sidecar starting, ready, or failed with its startup error. With no
+  agent configured it offers **Open settings** and **Try the demo** (the keyless
+  `--demo=tools` agent, for that session only).
+- Agent output is untrusted: raw HTML is never rendered, and a link opens only after you
+  confirm it. The panel talks to the sidecar over the extension host's stdio pipe; it opens
+  no network port.
+
+The panel runs its own sidecar, separate from the `@langstage` participant's, so the two
+don't share conversations. **Preview limits:** answering a human-in-the-loop interrupt from
+the panel, a conversation list, and transcripts that survive a window reload come in the
+next previews (see the [build plan](docs/plan-standalone-panel.md), M3 and M4). Until then,
+a conversation paused on an interrupt shows the request read-only; start a new conversation
+with **+**. The extension is disabled in untrusted (Restricted Mode) workspaces, because
+running your agent executes workspace code.
+
+### For Copilot users: the `@langstage` chat participant
+
+Where the editor has a chat view (VS Code with Copilot), open it and start a message with
+`@langstage`:
 
 ```
 @langstage summarize the failing tests in this repo and propose a fix
@@ -499,7 +532,8 @@ pytest
 cd extension
 npm install
 npm run compile
-npm test               # unit tests for the chat's interrupt handling (node --test)
+npm test               # unit tests: sidecar client, panel host, protocol, webview reducer
+npm run watch:webview  # rebuild the panel's webview bundle on change
 npm run package        # build the .vsix
 ```
 

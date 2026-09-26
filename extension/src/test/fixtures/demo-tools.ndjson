@@ -1,0 +1,47 @@
+{"type": "ready"}
+{"type": "ack", "ref": "message"}
+{"type": "tool_start", "id": "demo_lookup_1", "name": "demo_lookup", "args": {"query": "please use a tool"}, "node": "agent"}
+{"type": "tool_end", "id": "demo_lookup_1", "name": "demo_lookup", "result": "{\"query\": \"please use a tool\", \"answer\": \"42\", \"source\": \"demo-kb\"}", "status": "success", "error_message": null, "duration_ms": 16}
+{"type": "extraction", "tool_name": "demo_lookup", "extracted_type": "demo_fact", "data": {"query": "please use a tool", "answer": "42"}}
+{"type": "content", "content": "The ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "demo ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "tool ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "returned ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "{\"query\": ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "\"please ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "use ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "a ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "tool\", ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "\"answer\": ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "\"42\", ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "\"source\": ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "\"demo-kb\"}. ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "That ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "completes ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "the ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "tool_start ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "-> ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "tool_end ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "-> ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "extraction ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "content", "content": "flow.", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c688-7ec1-b4f1-1f2c86af708c"}
+{"type": "complete", "outcome": "complete"}
+{"type": "turn_end", "session_id": "s1"}
+{"type": "ack", "ref": "message"}
+{"type": "reasoning", "content": "Let me reason about this step by step. ", "node": "agent"}
+{"type": "reasoning", "content": "The demo streams this as a `reasoning` frame, kept separate from the answer. ", "node": "agent"}
+{"type": "content", "content": "Done ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "reasoning ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "\u2014 ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "that ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "was ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "the ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "`reasoning` ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "frame ", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "content", "content": "demo.", "role": "assistant", "node": "agent", "message_id": "lc_run--01a0de9f-c72f-75c2-8b5e-1a79d4b09202"}
+{"type": "complete", "outcome": "complete"}
+{"type": "turn_end", "session_id": "s1"}
+{"type": "ack", "ref": "message"}
+{"type": "interrupt", "action_requests": [{"action": "ask_user", "args": {"question": "What should I call you?"}}], "review_configs": [], "allowed_decisions": ["respond", "approve"]}
+{"type": "complete", "outcome": "interrupted"}
+{"type": "turn_end", "session_id": "s1"}

@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.5.0] - 2026-09-26
+
+The **LangStage panel (preview)**: the extension's own webview chat, which works with or
+without Copilot and in every VS Code-based editor
+([ADR 0001](docs/adr/0001-standalone-panel.md), build plan milestones M0 to M2). The
+sidecar is unchanged (no protocol change, no Python release).
+
+### Added
+- **The LangStage panel.** An activity-bar view (`langstage.chat`) whose UI is a small
+  React app bundled with esbuild (`dist/webview/main.js`, 188 KB), under a strict CSP
+  (`default-src 'none'`, nonce'd script, no `connect-src`). It talks to the extension host
+  over `postMessage` (a versioned protocol in `src/shared/panelProtocol.ts`), and the host
+  to the panel's own stdio sidecar.
+  - Streamed markdown replies; a new `message_id` starts a new block (gh #108).
+  - Tool-call cards: name, arguments, result (truncated with an expand control), status and
+    duration; `tool_start` and `tool_end` paired by `id`; other extractions shown on the
+    card.
+  - Reasoning as a collapsed block that streams in place.
+  - One live **Tasks** checklist per conversation, updated in place by each `todos`
+    extraction.
+  - Errors inline, with the `traceback` collapsible.
+  - Stop: a cooperative `cancel` that keeps the conversation's memory.
+  - A status line: starting, ready, failed (the startup error verbatim, gh #131) or stopped;
+    **Open settings** and **Try the demo** when no agent is configured; Retry / Restart.
+  - Links in agent output open only through the host, after a confirmation, and only for
+    http(s) and mailto. Raw HTML is never rendered.
+  - Commands: **Open the LangStage panel**, **New conversation**, **Restart the agent**.
+- Components are ported from the web app's frontend (`MessageBubble`, `ToolCallCard`,
+  `TodoPanel`, and `useAgentStream`'s frame handling as a pure reducer), re-themed with
+  the editor's `--vscode-*` colors.
+
+### Changed
+- **Shared `SidecarClient`** (`src/sidecar.ts`): spawn, `ready` gating, startup-error
+  capture, frame routing, a turn queue, cooperative cancel and dispose, moved out of the chat
+  participant. The participant (`src/participant.ts`) and the panel each own one; the
+  participant's behavior is unchanged.
+- **The chat participant is registered only where `vscode.chat` exists.** Activation used
+  to call it unconditionally, which threw in editors without the chat API (Cursor,
+  VSCodium, code-server).
+- The extension declares `untrustedWorkspaces: { supported: false }` (running the agent
+  executes workspace code) and `virtualWorkspaces: false` (the sidecar needs a folder on
+  disk).
+- The webview renders with Preact through `preact/compat`: 188 KB against React 19's
+  387 KB for the same source (ADR 0001, open question 6). `node esbuild.mjs --react` builds
+  with React.
+
+### Tests
+- `npm test` runs unit tests for the `SidecarClient` (a fake child process replaying a
+  recorded `--demo=tools` transcript), the panel's host logic, the message protocol and the
+  webview reducer: 43 tests, up from 8.
+- `test/real-sidecar-check.js` drives the panel's host logic against the real sidecar
+  (`--demo=tools`, keyless): the no-agent status and **Try the demo**, a streamed reply, a
+  tool card, reasoning, and a cooperative cancel.
+- `test/harness/` renders the real webview bundle in Chromium from a recorded transcript
+  (the screenshot in the README).
+
 ## [0.5.33] - 2026-09-25
 
 The sidecar adopts the LangStage family exit codes

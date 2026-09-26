@@ -239,6 +239,8 @@ the panel's reducer is the one place to change.
 2. **Placement.** The plan's default is an activity-bar view, which users can drag to the
    secondary sidebar. Should "Open in editor tab" (a `WebviewPanel`) be added as a
    follow-up?
+   - *M1 (2026-09-26):* shipped as the activity-bar view `langstage.chat`, as planned. The
+     editor-tab follow-up stays open.
 3. **Concurrent conversations.** The sidecar runs one turn at a time. Queueing is fine for
    v1; true parallelism would need an async command loop in the sidecar.
 4. **Memory across reloads.** Transcripts persist host-side, but the default in-memory
@@ -251,6 +253,15 @@ the panel's reducer is the one place to change.
    langstage-vscode` when the sidecar is missing?
 6. **React versus Preact.** React 19 keeps the port faithful to the web code; Preact
    would roughly halve the bundle. Measure in M1.
+   - *Decided in M1 (2026-09-26): Preact, through `preact/compat`.* Measured on the M2 UI
+     (markdown, tool cards, reasoning, todos): React 19 is **387 KB** minified, 13 KB under
+     the plan's 400 KB budget before M3/M4 add the interrupt card and the conversation
+     list; Preact 10 is **188 KB**. The source is still written against React's API and
+     types, so the port stays faithful to the web code and a component can be copied
+     across. Only the bundle swaps in `preact/compat` (an esbuild alias), and
+     `node esbuild.mjs --react` builds with React. `react-markdown` and `remark-gfm` render
+     correctly under it (checked in the webview harness). Revisit if a shared
+     `@langstage/chat-ui` package (question 1) needs React-only features.
 7. **Publisher accounts.** The VS Code Marketplace publisher `dkedar7` (an Azure DevOps
    personal access token) and the Open VSX `dkedar7` namespace claim are both still
    needed.
