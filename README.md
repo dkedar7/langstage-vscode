@@ -17,7 +17,7 @@ It has two parts in one repo:
 - **`langstage_vscode/`** — a small Python **stdio sidecar** that loads your
   agent and streams its events. Built on
   [`langstage-core`](https://github.com/dkedar7/langstage-core),
-  so it speaks the same typed event vocabulary as the other LangStage stages
+  so it streams the same AG-UI frame vocabulary as the other LangStage stages
   (`langstage`, `langstage-jupyter`, `langstage-cli`).
 
 ```
@@ -46,7 +46,7 @@ langstage-vscode is the VS Code stage of the **LangStage family**: write your ag
 | Terminal | [langstage-cli](https://github.com/dkedar7/langstage-cli) | `langstage-cli -a my_agent.py:graph` |
 | VS Code | langstage-vscode | **you are here** |
 | Reference agent | [langstage-hermes](https://github.com/dkedar7/langstage-hermes) | `LANGSTAGE_AGENT_SPEC=langstage_hermes.agent:graph` on any stage |
-| Shared core | [langstage-core](https://github.com/dkedar7/langstage-core) | typed events + config resolver + AG-UI bridge behind every stage |
+| Shared core | [langstage-core](https://github.com/dkedar7/langstage-core) | AG-UI streaming bridge + config resolver behind every stage |
 
 📖 **Full documentation:** <https://dkedar7.github.io/langstage-docs/>
 
@@ -256,8 +256,9 @@ resumed with: {'decisions': [{'type': 'approve'}]}
   unanswered — the same "paused awaiting a decision" signal `--message` uses.
 
 You can still drive `decision` over the raw stdio protocol directly
-(`{"type": "decision", "session_id": "...", "decisions": [{"type": "approve"}]}`) — that is what
-the VS Code extension does, since interactive approval is not wired into the chat UI yet.
+(`{"type": "decision", "session_id": "...", "decisions": [{"type": "approve"}]}`). That is what
+the VS Code extension sends when you click a decision button in the chat (see
+[Answering an interrupt from the chat](#answering-an-interrupt-from-the-chat)).
 
 Your agent is any LangGraph `CompiledGraph` (e.g. from `deepagents`), exported
 under the name in the spec:
@@ -381,8 +382,8 @@ killing the sidecar to stop a turn, which throws the conversation's memory away.
 with no turn in flight for the session is answered with an `error` frame
 (`no turn in progress for session '…'`), consistent with the `decision`/`message` guards.
 
-**Events** (sidecar → client) — the `event_to_dict()` shapes from
-`langstage-core`, plus a few protocol frames:
+**Events** (sidecar → client): langstage-core's AG-UI event-wire frames (the same frame
+vocabulary every LangStage stage streams), plus a few protocol frames:
 
 ```jsonc
 {"type": "ready"}                          // emitted once at startup
