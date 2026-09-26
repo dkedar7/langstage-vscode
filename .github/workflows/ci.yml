@@ -60,3 +60,12 @@ jobs:
           node-version: "20"
       - run: npm ci
       - run: npm run compile
+      - run: npm test
+      # gh #138: build the installable .vsix on every run and keep it as a workflow
+      # artifact (`code --install-extension langstage-vscode-<version>.vsix`).
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: langstage-vscode-vsix
+          path: extension/*.vsix
+          if-no-files-found: error

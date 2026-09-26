@@ -2,12 +2,16 @@
   "name": "langstage-vscode",
   "displayName": "LangStage",
   "description": "Chat with your LangGraph agent from VS Code, alongside Copilot — the VS Code stage of the LangStage family.",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "publisher": "dkedar7",
   "engines": {
     "vscode": "^1.95.0"
   },
-  "categories": ["AI", "Chat", "Other"],
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
@@ -17,9 +21,41 @@
         "name": "langstage",
         "fullName": "LangStage",
         "description": "Run your LangGraph agent",
-        "isSticky": true
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "approve",
+            "description": "Approve the action the agent is waiting on"
+          },
+          {
+            "name": "reject",
+            "description": "Reject the pending action, with an optional reason"
+          },
+          {
+            "name": "respond",
+            "description": "Answer the agent's pending request with your text"
+          },
+          {
+            "name": "edit",
+            "description": "Approve with edited arguments: a JSON object such as {\"edited_action\": {...}}"
+          }
+        ]
       }
     ],
+    "commands": [
+      {
+        "command": "langstage.answerInterrupt",
+        "title": "LangStage: Answer the pending interrupt"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "langstage.answerInterrupt",
+          "when": "false"
+        }
+      ]
+    },
     "configuration": {
       "title": "LangStage",
       "properties": {
@@ -51,11 +87,19 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test": "tsc -p ./ && node --test dist/test/hitl.test.js",
+    "package": "vsce package --no-dependencies",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.4.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dkedar7/langstage-vscode"
   }
 }

@@ -3,6 +3,16 @@ import { spawn, ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 import * as readline from 'readline';
 import { PassThrough } from 'stream';
+import {
+  PendingInterrupt,
+  buildDecisions,
+  buttonQuery,
+  buttonTitle,
+  isDecisionCommand,
+  pendingFromFrame,
+  pendingFromMetadata,
+  summarizeActions,
+} from './hitl';
 
 /**
  * LangStage VS Code chat participant.
@@ -25,6 +35,16 @@ export function activate(context: vscode.ExtensionContext) {
   const participant = vscode.chat.createChatParticipant('langstage.agent', handler);
   participant.iconPath = new vscode.ThemeIcon('robot');
   context.subscriptions.push(participant);
+
+  // The interrupt card's buttons: submit (or prefill) `@langstage /<verb>` in the chat,
+  // so the answer runs as a turn of the same conversation and streams its reply there.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      ANSWER_COMMAND,
+      (q: { query: string; isPartialQuery: boolean }) =>
+        vscode.commands.executeCommand('workbench.action.chat.open', q),
+    ),
+  );
 
   // Tear the sidecar down when the extension unloads.
   context.subscriptions.push({ dispose: () => disposeSidecar() });
@@ -73,6 +93,25 @@ function sidecarKey(python: string, agentSpec: string, workspace: string): strin
 
 /** ChatResult.metadata key carrying a conversation's sidecar `session_id`. */
 const SESSION_KEY = 'langstageSessionId';
+/** ChatResult.metadata key carrying the interrupt a turn ended on, if any. */
+const PENDING_KEY = 'langstagePendingInterrupt';
+/** Command behind the interrupt card's buttons. */
+const ANSWER_COMMAND = 'langstage.answerInterrupt';
+
+/**
+ * The interrupt this conversation's latest @langstage turn ended on, if any. A turn
+ * that ends paused returns it in its result metadata, the same way the session id
+ * travels (gh #133); the turn that answers it returns none, so it clears.
+ */
+function pendingInterrupt(history: vscode.ChatContext['history']): PendingInterrupt | undefined {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const turn = history[i];
+    if (turn instanceof vscode.ChatResponseTurn) {
+      return pendingFromMetadata(turn.result.metadata?.[PENDING_KEY]);
+    }
+  }
+  return undefined;
+}
 
 /**
  * The `session_id` (hence LangGraph `thread_id`) for THIS chat conversation (gh #133).
@@ -112,7 +151,8 @@ async function handler(
 ): Promise<vscode.ChatResult> {
   // Returned on every path so the NEXT turn of this conversation finds its id (gh #133).
   const sessionId = conversationSessionId(chatContext.history);
-  const result: vscode.ChatResult = { metadata: { [SESSION_KEY]: sessionId } };
+  const metadata: Record<string, unknown> = { [SESSION_KEY]: sessionId };
+  const result: vscode.ChatResult = { metadata };
 
   const config = vscode.workspace.getConfiguration('langstage');
   const legacy = vscode.workspace.getConfiguration('deepagent');
@@ -121,12 +161,44 @@ async function handler(
   const python =
     config.get<string>('pythonPath') || legacy.get<string>('pythonPath') || 'python';
 
+  // HITL: `/approve`, `/reject`, `/respond`, `/edit` answer the interrupt this
+  // conversation is paused on, as a `decision` on the same session, and the resumed
+  // turn streams into this response. A plain message can't reach a paused agent (the
+  // sidecar refuses it, gh #134), so it gets the ways to answer instead.
+  const pending = pendingInterrupt(chatContext.history);
+  let command: Record<string, unknown>;
+  if (isDecisionCommand(request.command)) {
+    if (!pending) {
+      stream.markdown('Nothing in this conversation is waiting for a decision.');
+      return result;
+    }
+    const built = buildDecisions(request.command, request.prompt, pending);
+    if (!built.ok) {
+      stream.markdown(built.reason);
+      renderDecisionButtons(stream, pending.allowed);
+      metadata[PENDING_KEY] = pending; // still paused
+      return result;
+    }
+    command = { type: 'decision', session_id: sessionId, decisions: built.decisions };
+  } else if (pending) {
+    stream.markdown(
+      'The agent is paused, waiting for your decision on its last request. Answer it ' +
+        'with a button, or type `@langstage /approve`, `/reject [reason]`, ' +
+        '`/respond <text>` or `/edit <json>` (whichever it allows).',
+    );
+    renderDecisionButtons(stream, pending.allowed);
+    metadata[PENDING_KEY] = pending;
+    return result;
+  } else {
+    command = { type: 'message', session_id: sessionId, content: request.prompt };
+  }
+
   // gh #118: an empty prompt (`@langstage` + Enter) would reach the sidecar as a
   // `message` with empty `content`, which it rejects with an `error` frame —
   // historically with no `turn_end`, leaving runTurn's promise pending forever
   // and the spinner stuck. Short-circuit here with a hint instead of spawning
   // a doomed turn. (The sidecar now also emits `turn_end` on that rejection.)
-  if (!request.prompt || !request.prompt.trim()) {
+  if (command.type === 'message' && !request.prompt.trim()) {
     stream.markdown('Please type a message for @langstage — the prompt was empty.');
     return result;
   }
@@ -144,7 +216,16 @@ async function handler(
 
   try {
     const sc = getOrCreateSidecar(python, agentSpec, workspace);
-    await runTurn(sc, sessionId, request.prompt, stream, token);
+    const turn = await runTurn(sc, sessionId, command, stream, token);
+    // A turn that ends on an interrupt leaves the conversation paused. So does a
+    // decision the sidecar refused (an error before any `ack`): the interrupt it was
+    // answering is still pending there, so keep offering the buttons.
+    const refused = command.type === 'decision' && !turn.acked;
+    const stillPending = turn.interrupt ?? (refused ? pending : undefined);
+    if (stillPending) {
+      metadata[PENDING_KEY] = stillPending;
+      if (refused) renderDecisionButtons(stream, stillPending.allowed);
+    }
   } catch (err) {
     // A broken sidecar must not stay cached and poison every later turn.
     disposeSidecar();
@@ -296,19 +377,24 @@ function spawnSidecar(
 function runTurn(
   sc: Sidecar,
   sessionId: string,
-  prompt: string,
+  command: Record<string, unknown>,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
-): Promise<void> {
+): Promise<TurnRenderState> {
   return sc.ready.then(
     () =>
-      new Promise<void>((resolve, reject) => {
+      new Promise<TurnRenderState>((resolve, reject) => {
         if (!sc.alive || !sc.proc.stdin) {
           reject(new Error('sidecar is not available'));
           return;
         }
 
         let done = false;
+        const turn: TurnRenderState = {
+          lastMessageId: undefined,
+          interrupt: undefined,
+          acked: false,
+        };
         const exitHandler = () => finish(() => reject(new Error('sidecar exited mid-turn')));
         const cancelSub = token.onCancellationRequested(() => {
           // The sidecar has a cooperative per-turn `cancel` command (gh #67,
@@ -329,7 +415,7 @@ function runTurn(
             // stdin is already gone (the process is dying) — fall back to a clean
             // teardown so the turn still ends and the next one respawns.
             disposeSidecar();
-            finish(resolve);
+            finish(() => resolve(turn));
           }
         });
 
@@ -342,18 +428,16 @@ function runTurn(
           settle();
         }
 
-        const turn: TurnRenderState = { lastMessageId: undefined };
         sc.onEvent = (event: AgentEvent) => {
           dispatch(event, stream, turn);
           if (event.type === 'turn_end') {
-            finish(resolve);
+            finish(() => resolve(turn));
           }
         };
         sc.proc.once('exit', exitHandler);
 
-        sc.proc.stdin.write(
-          JSON.stringify({ type: 'message', session_id: sessionId, content: prompt }) + '\n',
-        );
+        // A `message`, or a `decision` answering this session's pending interrupt.
+        sc.proc.stdin.write(JSON.stringify(command) + '\n');
       }),
   );
 }
@@ -380,6 +464,26 @@ function disposeSidecar(): void {
 interface TurnRenderState {
   /** `message_id` of the last `content` frame rendered in this turn (gh #108). */
   lastMessageId: string | undefined;
+  /** The interrupt this turn ended on: the conversation now waits for a decision. */
+  interrupt: PendingInterrupt | undefined;
+  /** The sidecar accepted the command (`ack`). */
+  acked: boolean;
+}
+
+/** One button per advertised verb the chat can send; any other verb is listed as text. */
+function renderDecisionButtons(stream: vscode.ChatResponseStream, allowed: string[]): void {
+  const other: string[] = [];
+  for (const verb of allowed) {
+    const q = buttonQuery(verb);
+    if (q) {
+      stream.button({ command: ANSWER_COMMAND, title: buttonTitle(verb), arguments: [q] });
+    } else {
+      other.push('`' + verb + '`');
+    }
+  }
+  if (other.length) {
+    stream.markdown(`\n\nAlso allowed, but not answerable from the chat: ${other.join(', ')}.\n`);
+  }
 }
 
 /** Map one sidecar event onto the chat response stream. */
@@ -428,30 +532,30 @@ function dispatch(
       }
       break;
     case 'interrupt': {
-      // HITL: v0 surfaces the requested action. The decision round-trip
-      // (sending {"type":"decision",...} back to the sidecar) is the next
-      // increment — it needs a confirmation affordance in the chat UI.
-      const actions = (event.action_requests as Array<Record<string, unknown>>) ?? [];
-      // Two shapes reach the wire, as the sidecar's `_interrupt_actions` documents:
-      // a HumanInterrupt LIST is unwrapped to {"action": <tool>, "args": {...}}
-      // (gh #44), while a single `interrupt({...})` object keeps the request nested
-      // as {"action_request": {"action": <tool>, ...}, "description": ...} (gh #101).
-      // Read the nested one first, then `.action`, then `.tool` for a keyed-dict
-      // interrupt, then a generic label.
-      const first = actions[0] ?? {};
-      const nested = first.action_request;
-      const inner =
-        nested && typeof nested === 'object' ? (nested as Record<string, unknown>) : undefined;
-      const tool = inner?.action ?? first.action ?? first.tool ?? 'an action';
-      stream.markdown(
-        `\n\n⚠️ The agent wants to run **${String(tool)}** and is waiting for ` +
-          'approval. Interactive approval is not wired up yet in this build, and this ' +
-          'conversation stays paused until it is answered: start a new chat to continue.\n',
-      );
+      // HITL: show what the agent wants to do and a button per verb the frame's
+      // `allowed_decisions` lists. A button submits `@langstage /<verb>` in this chat;
+      // the handler turns that into a `decision` on the same session (see hitl.ts).
+      const pending = pendingFromFrame(event);
+      turn.interrupt = pending;
+      const lines = ['\n\n⚠️ **The agent is waiting for your decision.**\n'];
+      for (const action of summarizeActions(event)) {
+        lines.push(`\n- **${action.name}**${action.description ? `: ${action.description}` : ''}\n`);
+        if (action.args !== undefined) {
+          lines.push('\n  ```json\n  ' + JSON.stringify(action.args, null, 2).replace(/\n/g, '\n  ') + '\n  ```\n');
+        }
+      }
+      if (!pending.allowed.length) {
+        lines.push('\nThe request lists no decisions the chat can send.\n');
+      }
+      stream.markdown(lines.join(''));
+      renderDecisionButtons(stream, pending.allowed);
       break;
     }
     case 'error':
       stream.markdown(`\n\n❌ ${String(event.error ?? 'unknown error')}\n`);
+      break;
+    case 'ack':
+      turn.acked = true;
       break;
     // ready / ack / complete / cancelled / turn_end / usage: no direct UI
     // output. `cancelled` (gh #67/#69) is the terminal frame for a cooperatively

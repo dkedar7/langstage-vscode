@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.32] - 2026-09-25
+
+Deferred-backlog pass, plus answering human-in-the-loop interrupts from the chat panel.
+Sidecar tests are in `tests/test_deferred_pass.py`; the extension's interrupt logic has
+unit tests (`npm test`).
+
+_Also ships VS Code extension 0.4.0 (`extension/package.json` 0.3.4 -> 0.4.0)._
+
+### Added
+- **Answer an interrupt from the chat (extension).** A turn that pauses on a
+  human-in-the-loop interrupt used to tell you to start a new chat. It now shows each
+  requested action (name, description, arguments) and a button per verb in the frame's
+  `allowed_decisions`: **Approve**, **Reject**, **Respond…**, **Edit…**. They map to the
+  new `@langstage /approve`, `/reject [reason]`, `/respond <text>` and `/edit <json>`
+  slash commands, which send a `decision` on the conversation's own session (gh #133)
+  and stream the resumed turn into the chat. Verbs are sent in the frame's spelling
+  (`accept` for a legacy interrupt), one decision per requested action. A verb the
+  interrupt doesn't allow is refused before it is sent, and the sidecar checks it again
+  with core's `normalize_decision`. While the agent is paused, a plain message is not
+  sent; the chat shows the buttons again. A decision the sidecar refuses keeps the
+  buttons.
+- **Installable `.vsix` (gh #138).** `npm run package` (`@vscode/vsce`) builds
+  `langstage-vscode-<version>.vsix`, and CI uploads it as the `langstage-vscode-vsix`
+  artifact on every run. The README documents `code --install-extension` as the install
+  path until the extension is on the Marketplace. The extension now declares its
+  license and repository, and CI runs `npm test`.
+- **`--version` names the runtime (gh #132):** `langstage-vscode-sidecar 0.5.32
+  (langstage-core 1.0.37, ag-ui-langgraph 0.0.45)`, the packages that set most of the
+  sidecar's behavior.
+
+### Fixed
+- **A cancelled turn no longer leaves its prompt in the agent's history (gh #106).**
+  A `cancel` aborted the turn after LangGraph had committed the human message, so the
+  next turn saw two human messages in a row. A cancelled `message` turn now rolls the
+  thread back to its checkpoint from before the turn (LangGraph's
+  `update_state(..., as_node="__copy__")`), or deletes the thread if the cancelled turn
+  was its first. The session and the rest of its memory are kept, as before. With an
+  async-only checkpointer the rollback is skipped.
+
+### Docs
+- **`--help` lists the `--demo=tools` trigger phrases (gh #97)**: `use a tool`,
+  `think`, `ask me`. Any other message is echoed, which used to look like a broken demo.
+
 ## [0.5.31] - 2026-09-25
 
 Adopts langstage-core 1.0.37 for decision-verb matching. Tests are in
