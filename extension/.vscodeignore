@@ -1,5 +1,10 @@
 src/**
+webview/**
 dist/test/**
 **/*.map
+**/*.ts
+**/*.tsx
 tsconfig.json
+esbuild.mjs
 node_modules/**
+test/**
