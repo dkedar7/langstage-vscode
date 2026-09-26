@@ -696,7 +696,28 @@ def _agent_key_typos(cfg: Any) -> list[str]:
 
 # `--selfcheck` exit code for an agent whose preflight turn paused on an interrupt
 # (gh #130) — the same "paused awaiting a decision" code `--message` / `--repl` use.
-SELFCHECK_PAUSED_EXIT = 2
+# The LangStage family exit codes (core ADR 0007,
+# https://github.com/dkedar7/langstage-core/blob/main/docs/adr/0007-family-exit-codes.md):
+# 0 ok / 1 failed / 2 paused on a HITL interrupt / 64 usage error. Defined locally (not
+# imported from langstage_core.cli) so the sidecar doesn't need core >= 1.0.38.
+EXIT_OK = 0
+EXIT_FAIL = 1
+EXIT_PAUSED = 2
+EXIT_USAGE = 64
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, which the family reserves for "paused"; exit
+    64 instead (ADR 0007). The message format is unchanged."""
+
+    def error(self, message: str):  # type: ignore[override]
+        import sys
+
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
+SELFCHECK_PAUSED_EXIT = EXIT_PAUSED
 
 
 def _selfcheck(
@@ -1498,7 +1519,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from langstage_core.host import HostConfig
 
-    parser = argparse.ArgumentParser(prog="langstage-vscode-sidecar")
+    parser = _ArgumentParser(
+        prog="langstage-vscode-sidecar",
+        epilog="Exit codes: 0 ok, 1 failed (no/bad agent, turn error, selfcheck failed), "
+        "2 paused on a human-in-the-loop interrupt, 64 usage error.",
+    )
     parser.add_argument(
         "-a",
         "--agent",
@@ -1670,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:
         safe_write(text + "\n", sys.stdout)
         return 0
 
-    def fail(msg: str) -> int:
+    def fail(msg: str, code: int = EXIT_FAIL) -> int:
         # gh #78 / #84: --message and --repl are the human/CLI front doors — in TEXT mode
         # they keep stdout the clean reply channel and route diagnostics to STDERR as
         # `error: <msg>`, and --json is the switch for raw frames. gh #78 gave the
@@ -1683,16 +1708,17 @@ def main(argv: list[str] | None = None) -> int:
         if (args.message is not None or args.repl) and not args.json:
             safe_write(f"error: {msg}\n", sys.stderr)
             sys.stderr.flush()
-            return 1
+            return code
         sys.stdout.write(json.dumps({"type": "error", "error": msg}) + "\n")
         sys.stdout.flush()
-        return 1
+        return code
 
     spec = cfg.agent_spec
     spec_from_config = True
     if args.demo:
         if args.agent:
-            return fail("--demo and --agent are mutually exclusive")
+            # A usage error (ADR 0007): 64, not 1.
+            return fail("--demo and --agent are mutually exclusive", EXIT_USAGE)
         # args.demo is "echo" (bare --demo, via const) or "tools" — never an
         # invalid value, which argparse rejects up front via choices=.
         spec = DEMO_SPECS[args.demo]
@@ -1720,7 +1746,7 @@ def main(argv: list[str] | None = None) -> int:
     # --message is one-shot, --repl is multi-turn interactive; both drive turns but
     # over different input models, so asking for both is a contradiction.
     if args.repl and args.message is not None:
-        return fail("--repl and --message are mutually exclusive")
+        return fail("--repl and --message are mutually exclusive", EXIT_USAGE)
 
     if args.selfcheck:
         # With no agent configured, validate the runtime itself via the demo stub.

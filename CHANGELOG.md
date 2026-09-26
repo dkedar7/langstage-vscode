@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.33] - 2026-09-25
+
+The sidecar adopts the LangStage family exit codes
+([core ADR 0007](https://github.com/dkedar7/langstage-core/blob/main/docs/adr/0007-family-exit-codes.md)):
+`0` ok, `1` failed, `2` paused on a human-in-the-loop interrupt, `64` usage error. No new
+langstage-core requirement: the constants are defined in the sidecar.
+
+### Changed (breaking for scripts that matched the old codes)
+- **Usage errors exit `64`.** argparse errors (an unknown flag, `--demo=bogus`, a flag missing
+  its value) were `2`, the code for "paused". Conflicting flags (`--demo` with `--agent`,
+  `--repl` with `--message`) were `1`. The error text and where it is printed are unchanged.
+
+### Unchanged (now pinned by tests)
+- `--selfcheck`: `0` healthy, `2` paused on an interrupt, `1` failed. `--message`: `0` / `1` /
+  `2`. `--repl`: `2` if an interrupt is left unanswered. No agent spec, a load failure and a bad
+  workspace: `1`.
+
+### Docs
+- README "Exit codes" table; `--help` lists the codes.
+
 ## [0.5.32] - 2026-09-25
 
 Deferred-backlog pass, plus answering human-in-the-loop interrupts from the chat panel.
