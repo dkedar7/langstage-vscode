@@ -174,12 +174,20 @@ test('a second conversation queues behind a running turn; Stop in one leaves the
 
 test('conversations: rename and delete', async ({ page }) => {
   await openPanel(page, 'demo');
+  // Wait for the reply, not just the Send button: Send is also visible in the moment
+  // after a send, before the host's `turn/queued` arrives. The New conversation click
+  // then raced the first turn, and 'second chat' was typed into the first (busy)
+  // conversation, which ignores Enter.
   await send(page, 'first chat');
+  await expect(lastReply(page)).toContainText('You said: first chat');
   await idle(page);
   await page.getByRole('button', { name: 'New conversation' }).click();
+  // The host answers with a `restore` that makes the new conversation active.
+  await expect(page.getByRole('button', { name: 'Conversations', exact: true })).toContainText('New conversation');
   await send(page, 'second chat');
+  await expect(lastReply(page)).toContainText('You said: second chat');
   await idle(page);
-  await page.getByRole('button', { name: 'Conversations' }).click();
+  await page.getByRole('button', { name: 'Conversations', exact: true }).click();
   const list = page.getByRole('list', { name: 'Conversation list' });
   await list.getByRole('button', { name: 'Rename first chat' }).click();
   await list.getByLabel('Conversation title').fill('Renamed');
