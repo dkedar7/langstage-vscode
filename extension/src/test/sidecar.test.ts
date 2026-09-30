@@ -1,7 +1,7 @@
 // SidecarClient tests against a fake child process (no Python needed): `npm test`.
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { SidecarClient, SidecarFrame, isNoAgentError, sidecarArgs } from '../sidecar';
+import { SidecarClient, SidecarFrame, isNoAgentError, readyCheckpointer, sidecarArgs } from '../sidecar';
 import { demoToolsTurns, fakeSpawn, tick } from './fakeSidecar';
 
 function makeClient() {
@@ -66,6 +66,41 @@ test('turns are serialized: the second command waits for the first turn_end', as
   procs[0].emitFrames([{ type: 'turn_end', session_id: 'B' }]);
   assert.equal((await b.done).acked, false);
   client.dispose();
+});
+
+test('gh #152: the ready status carries the checkpointer the ready frame reports', async () => {
+  const { client, procs } = makeClient();
+  const ready = client.start();
+  await tick();
+  procs[0].emitFrames([{ type: 'ready', checkpointer: { kind: 'SqliteSaver', durable: true } }]);
+  await ready;
+  assert.deepEqual(client.status, { state: 'ready', checkpointer: { kind: 'SqliteSaver', durable: true } });
+  client.dispose();
+});
+
+test('gh #152: an older sidecar (bare ready) leaves the checkpointer unknown', async () => {
+  const { client, procs } = makeClient();
+  const ready = client.start();
+  await tick();
+  procs[0].emitFrames([{ type: 'ready' }]);
+  await ready;
+  assert.deepEqual(client.status, { state: 'ready' });
+  client.dispose();
+});
+
+test('readyCheckpointer accepts the documented shape and rejects anything else', () => {
+  assert.deepEqual(readyCheckpointer({ type: 'ready', checkpointer: { kind: 'InMemorySaver', durable: false } }), {
+    kind: 'InMemorySaver',
+    durable: false,
+  });
+  assert.deepEqual(readyCheckpointer({ type: 'ready', checkpointer: { kind: null, durable: false } }), {
+    kind: null,
+    durable: false,
+  });
+  assert.equal(readyCheckpointer({ type: 'ready' }), undefined);
+  assert.equal(readyCheckpointer({ type: 'ready', checkpointer: 'SqliteSaver' }), undefined);
+  assert.equal(readyCheckpointer({ type: 'ready', checkpointer: [true] }), undefined);
+  assert.equal(readyCheckpointer({ type: 'ready', checkpointer: { kind: 'X', durable: 'yes' } }), undefined);
 });
 
 test('an interrupt turn reports the interrupt frame', async () => {

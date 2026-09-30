@@ -48,6 +48,11 @@ export interface PanelStatus {
   demo?: boolean;
   /** The configured agent spec, for display ('' = langstage.toml / env). */
   agentSpec?: string;
+  /**
+   * For `ready`: the agent's checkpointer, from the sidecar's `ready` frame (gh #152).
+   * Absent until the sidecar is ready, and from a sidecar older than 0.5.34.
+   */
+  checkpointer?: { kind: string | null; durable: boolean };
 }
 
 export interface ConversationInfo {

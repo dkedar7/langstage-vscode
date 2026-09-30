@@ -188,8 +188,12 @@ runnable graph, drives one turn, and exits `0` (healthy) / non-zero with a preci
 message (add `--json` for a machine-readable verdict). If that turn pauses on a
 human-in-the-loop interrupt instead of replying, the verdict is `PAUSED:` (`"ok": false,
 "interrupt": true` in `--json`) with exit `2`, the code `--message` uses for a pause.
-In the chat, such an agent asks for your decision on its first `@langstage` turn (see
-[Answering an interrupt](#answering-an-interrupt-from-the-chat)):
+Such an agent works in the editor: it asks for your decision on its first turn, as an
+approval card in the LangStage panel or as decision buttons under `@langstage` (see
+[Answering an interrupt](#answering-an-interrupt-from-the-chat)). From the CLI, `--repl`
+answers it with `:decision <verb>`. The `--json` verdict also carries `checkpointer`,
+the served agent's checkpointer as the `ready` frame reports it (see
+[Sidecar protocol](#sidecar-protocol)):
 
 ```bash
 langstage-vscode-sidecar --selfcheck                       # validate the runtime via the demo stub
@@ -366,10 +370,13 @@ against the real sidecar running `--demo=tools`. No Copilot, no API key.*
   only its own conversation.
 - **Transcripts persist per workspace** (in the extension's workspace storage, on this
   machine, not synced) and come back after a window reload. The agent process is new after a
-  reload, so the panel marks where its memory stops: *"The agent may not remember the
-  conversation above"*. With the default in-memory checkpointer it doesn't; configure a
-  durable checkpointer to keep memory across restarts. A request that was still waiting for
-  your decision can't be answered after a reload; send a new message instead.
+  reload, so with the default in-memory checkpointer the agent has forgotten them, and the
+  panel marks where its memory stops: *"The agent may not remember the conversation
+  above"*. With a durable checkpointer (`SqliteSaver`, `PostgresSaver`, ...) the agent
+  still has the conversation, and the note is not shown (extension 0.6.1 with sidecar
+  0.5.34 or later, which reports the checkpointer in its `ready` frame; with an older
+  sidecar the note is always shown). A request that was still waiting for your decision
+  can't be answered after a reload; send a new message instead.
 - The status line shows the sidecar starting, ready, or failed with its startup error. With no
   agent configured it offers **Open settings** and **Try the demo** (the keyless
   `--demo=tools` agent, for that session only).
@@ -444,8 +451,12 @@ python -m langstage_vscode --demo=tools
 {"type": "message",  "session_id": "s1", "content": "hello"}
 {"type": "decision", "session_id": "s1", "decisions": [{"type": "approve"}]}
 {"type": "cancel",   "session_id": "s1"}   // abort the in-flight turn, keep the session
-{"type": "shutdown"}
+{"type": "shutdown"}                        // end the loop; the process exits 0
 ```
+
+`shutdown` and closing stdin both end the loop with exit `0`. A client does not have to
+close stdin after `shutdown`; the extension keeps the pipe open until the process exits
+(gh #151).
 
 **Decision verbs.** Each entry in `decisions` needs a string `type`, and that verb must
 be one the pending `interrupt` frame lists in `allowed_decisions`. The advertised verbs
@@ -484,7 +495,9 @@ with no turn in flight for the session is answered with an `error` frame
 vocabulary every LangStage stage streams), plus a few protocol frames:
 
 ```jsonc
-{"type": "ready"}                          // emitted once at startup
+{"type": "ready", "checkpointer": {"kind": "InMemorySaver", "durable": false}}
+                                           // emitted once at startup; "checkpointer" is
+                                           // the served agent's saver (see below)
 {"type": "ack", "ref": "message"}          // command accepted ("ref": "decision" for a decision)
 {"type": "content", "content": "...", "role": "assistant", "node": "...", "message_id": "..."}
                                            // assistant text; a new message_id = a new
@@ -514,6 +527,14 @@ The sidecar wires core's `TodoExtractor` into every turn, so an agent that calls
 `write_todos` (the `deepagents` planning tool) emits the `todos` `extraction` frame above.
 `--demo=tools` wires the demo's own extractor instead (`"extracted_type": "demo_fact"`).
 A client should ignore a frame type or key it doesn't know: new keys are additive.
+
+`ready`'s `checkpointer` (sidecar 0.5.34+) describes the checkpointer the served agent
+actually runs with: `kind` is its class name (`InMemorySaver` when the graph was compiled
+without one and the sidecar attached the in-memory default), and `durable` says whether
+its threads outlive the process. An in-memory saver is not durable; any other saver
+(`SqliteSaver`, `PostgresSaver`, ...) is taken to be. The panel shows its "may not remember"
+note after a restart only when `durable` is not `true`. If the agent can't be served (the
+spec isn't a runnable graph), `ready` has no `checkpointer` and the `error` frame follows.
 
 > A client must handle `error`: a malformed/unknown command, a `message` with no
 > `content`, an invalid `decision` (including a well-formed one sent when the session

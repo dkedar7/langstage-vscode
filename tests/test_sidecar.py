@@ -111,7 +111,10 @@ def test_help_output_is_ascii(capsys):
 
 def test_ready_is_first_event():
     events = drive(_stub(), [{"type": "shutdown"}])
-    assert events[0] == {"type": "ready"}
+    # gh #152: `ready` also names the served agent's checkpointer.
+    assert events[0] == {
+        "type": "ready", "checkpointer": {"kind": "InMemorySaver", "durable": False},
+    }
 
 
 def test_message_turn_emits_content_and_terminals():
@@ -531,7 +534,7 @@ def test_main_toml_supplies_agent_spec(monkeypatch, tmp_path, capsys):
     )
     assert main([]) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert events[0] == {"type": "ready"}
+    assert events[0]["type"] == "ready"
 
 
 def test_main_legacy_toml_still_works(monkeypatch, tmp_path, capsys):
@@ -545,7 +548,7 @@ def test_main_legacy_toml_still_works(monkeypatch, tmp_path, capsys):
     )
     assert main([]) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert events[0] == {"type": "ready"}
+    assert events[0]["type"] == "ready"
 
 
 def test_legacy_module_import_warns():

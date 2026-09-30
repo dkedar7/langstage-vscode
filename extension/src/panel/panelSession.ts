@@ -12,7 +12,9 @@
  *   queue rather than the sidecar's stash, and Stop cancels only its own conversation.
  * - **Memory honesty.** When the sidecar process serving a conversation is replaced (a
  *   window reload, a restart, a crash), a `memory_reset` frame is logged: an in-memory
- *   checkpointer has forgotten the conversation, and any pending interrupt is gone.
+ *   checkpointer has forgotten the conversation, and any pending interrupt is gone. The
+ *   status carries the checkpointer the sidecar's `ready` frame reports (gh #152), so the
+ *   webview can leave out the "may not remember" note when it is durable.
  *
  * No `vscode` import: `PanelController` supplies the editor-specific pieces through
  * `PanelDeps`, so this runs under `node --test`, the Playwright harness and the scripted
@@ -324,6 +326,7 @@ export class PanelSession {
       noAgent: s.state === 'failed' && !this.demo && isNoAgentError(s.error),
       demo: this.demo,
       agentSpec: this.deps.agentSpec(),
+      ...(s.checkpointer ? { checkpointer: s.checkpointer } : {}),
     };
     this.deps.post({ v: 1, type: 'status', status: this.status });
     // The process died on its own (not a restart we asked for): the next turn gets a

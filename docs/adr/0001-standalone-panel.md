@@ -254,6 +254,11 @@ the panel's reducer is the one place to change.
      with the durable-checkpointer advice. Reporting the checkpointer in `ready` (next to
      the planned `version` / `protocol`) would let the panel drop the note when memory is
      durable.
+   - *gh #152 (2026-09-30):* done. Sidecar 0.5.34 reports `"checkpointer": {"kind",
+     "durable"}` in `ready`, read from the built agent, and extension 0.6.1 shows the note
+     only when `durable` is not `true` (so still with an older sidecar). `--show-config`
+     still does not load the agent, so it does not report the checkpointer; `--selfcheck
+     --json`, which does load it, carries the same object.
 5. **Interpreter discovery.** Should the panel offer "Select Python interpreter"? It could
    use the Python extension's API when present; that extension is on Open VSX, but the
    forks' Python tooling varies. Separately, should it offer to `pip install

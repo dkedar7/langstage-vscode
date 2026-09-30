@@ -367,6 +367,16 @@ export function pendingInterrupt(conv: ConversationView | undefined): Pending | 
   return conv?.pending;
 }
 
+/**
+ * Whether the agent keeps its memory across a sidecar restart (gh #152): only when the
+ * sidecar's `ready` frame reported a durable checkpointer. Unknown (the sidecar is not
+ * ready yet, or is older than 0.5.34 and doesn't report it) counts as not durable, so a
+ * `memoryReset` item keeps its "may not remember" note.
+ */
+export function memoryIsDurable(status: PanelStatus): boolean {
+  return status.checkpointer?.durable === true;
+}
+
 function stringify(x: unknown): string {
   return typeof x === 'string' ? x : JSON.stringify(x, null, 2);
 }
