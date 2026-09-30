@@ -110,10 +110,18 @@ def test_help_output_is_ascii(capsys):
 
 
 def test_ready_is_first_event():
+    from langstage_vscode import __version__
+    from langstage_vscode.sidecar import CAPABILITIES, PROTOCOL_VERSION
+
     events = drive(_stub(), [{"type": "shutdown"}])
-    # gh #152: `ready` also names the served agent's checkpointer.
+    # gh #152: `ready` also names the served agent's checkpointer; gh #89: and carries
+    # the handshake (version, protocol, capabilities).
     assert events[0] == {
-        "type": "ready", "checkpointer": {"kind": "InMemorySaver", "durable": False},
+        "type": "ready",
+        "version": __version__,
+        "protocol": PROTOCOL_VERSION,
+        "capabilities": list(CAPABILITIES),
+        "checkpointer": {"kind": "InMemorySaver", "durable": False},
     }
 
 
@@ -296,7 +304,8 @@ def test_non_graph_spec_emits_error_frame_not_crash():
     # to crash the sidecar with a raw AttributeError right after `ready`, with nothing on
     # the protocol stream. It must degrade to an actionable `error` frame instead.
     events = drive(_factory_fn(), [{"type": "message", "content": "hi"}, {"type": "shutdown"}])
-    assert events[0] == {"type": "ready"}  # ready still emitted first
+    # ready still emitted first (with the gh #89 handshake, but no checkpointer)
+    assert events[0]["type"] == "ready" and "checkpointer" not in events[0]
     err = [e for e in events if e["type"] == "error"]
     assert err, "expected an error frame for a non-runnable graph, not a crash"
     assert "not a runnable graph" in err[-1]["error"]

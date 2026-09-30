@@ -1,4 +1,4 @@
-{"type": "ready", "checkpointer": {"kind": "InMemorySaver", "durable": false}}
+{"type": "ready", "version": "0.5.35", "protocol": 1, "capabilities": ["message", "decision", "cancel", "shutdown", "checkpointer"], "checkpointer": {"kind": "InMemorySaver", "durable": false}}
 {"type": "ack", "ref": "message"}
 {"type": "tool_start", "id": "demo_lookup_1", "name": "demo_lookup", "args": {"query": "please use a tool"}, "node": "agent"}
 {"type": "tool_end", "id": "demo_lookup_1", "name": "demo_lookup", "result": "{\"query\": \"please use a tool\", \"answer\": \"42\", \"source\": \"demo-kb\"}", "status": "success", "error_message": null, "duration_ms": 16}

@@ -2,7 +2,7 @@
   "name": "langstage-vscode",
   "displayName": "LangStage",
   "description": "Chat with your LangGraph agent in VS Code, Cursor, VSCodium and other VS Code-based editors, with or without Copilot. The VS Code stage of the LangStage family.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "dkedar7",
   "engines": {
     "vscode": "^1.95.0"

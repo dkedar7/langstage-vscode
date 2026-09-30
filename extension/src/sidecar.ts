@@ -4,12 +4,14 @@
  * participant and the LangStage panel each own their own client.
  *
  * It covers what `extension.ts` used to do inline:
- * - spawn, and gate every turn on the sidecar's one `ready` frame;
+ * - spawn, and gate every turn on the sidecar's one `ready` frame, and read its handshake
+ *   (gh #89): refuse a sidecar that speaks a newer protocol, report an outdated one;
  * - startup-error capture: the `error` frame written before `ready`, else the tail of
  *   stderr (gh #131);
  * - routing each frame to the turn in flight (turns are serialized per process);
  * - a turn queue, so a second command waits for the first turn's `turn_end`;
- * - cooperative `cancel` (gh #67/#106), and `dispose`.
+ * - cooperative `cancel` (gh #67/#106), sent only to a sidecar that serves it, and
+ *   `dispose`.
  *
  * This module has no `vscode` import, so it runs under `node --test` with a fake
  * child process (see test/sidecar.test.ts).
@@ -34,6 +36,19 @@ export interface CheckpointerInfo {
   durable: boolean;
 }
 
+/**
+ * What the sidecar says about itself in its `ready` frame (sidecar 0.5.35+, gh #89). Every
+ * field is optional: an older sidecar sends none, and a malformed one is left out.
+ */
+export interface SidecarInfo {
+  /** Its langstage-vscode version, e.g. `0.5.35`. */
+  version?: string;
+  /** Its protocol version, bumped only for a breaking change. Absent means 1. */
+  protocol?: number;
+  /** What it serves (`message`, `decision`, `cancel`, ...). Absent from an older sidecar. */
+  capabilities?: string[];
+}
+
 export interface SidecarStatus {
   state: SidecarState;
   /** The startup error: the pre-`ready` `error` frame's text, or the last stderr line. */
@@ -42,6 +57,8 @@ export interface SidecarStatus {
   stderrTail?: string;
   /** For `ready`: the agent's checkpointer. Absent from a sidecar older than 0.5.34. */
   checkpointer?: CheckpointerInfo;
+  /** For `ready`: the sidecar's handshake (every field absent from one older than 0.5.35). */
+  info?: SidecarInfo;
 }
 
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -57,6 +74,11 @@ export interface SidecarOptions {
   spawn?: SpawnFn;
   /** How long to wait after `exit` for `close` (and a late pre-`ready` error frame). */
   exitGraceMs?: number;
+  /**
+   * Called once the sidecar is ready, with its handshake (not for one that is refused).
+   * The surfaces use it to warn about an outdated sidecar (see outdatedSidecar.ts).
+   */
+  onReady?: (info: SidecarInfo) => void;
 }
 
 /** How a turn ended. */
@@ -124,6 +146,87 @@ export function readyCheckpointer(frame: SidecarFrame): CheckpointerInfo | undef
   return { kind: typeof kind === 'string' ? kind : null, durable };
 }
 
+/** The oldest sidecar this extension is written against. An older one gets a warning. */
+export const MIN_SIDECAR_VERSION = '0.5.35';
+
+/** The sidecar protocol this extension speaks. A sidecar with a newer one is refused. */
+export const SUPPORTED_PROTOCOL = 1;
+
+/**
+ * The handshake of a `ready` frame (gh #89). A field of the wrong type is left out, so a
+ * malformed frame reads like an older sidecar's rather than failing.
+ */
+export function readyInfo(frame: SidecarFrame): SidecarInfo {
+  const info: SidecarInfo = {};
+  const { version, protocol, capabilities } = frame;
+  if (typeof version === 'string' && version.trim()) info.version = version.trim();
+  if (typeof protocol === 'number' && Number.isInteger(protocol) && protocol >= 1) info.protocol = protocol;
+  if (Array.isArray(capabilities)) {
+    info.capabilities = capabilities.filter((c): c is string => typeof c === 'string');
+  }
+  return info;
+}
+
+/** The numeric parts of a dotted version (`0.5.35rc1` -> [0, 5, 35]), or undefined. */
+function versionParts(version: string): number[] | undefined {
+  const m = /^\s*v?(\d+(?:\.\d+)*)/i.exec(version);
+  return m ? m[1].split('.').map(Number) : undefined;
+}
+
+/**
+ * Compare two dotted versions numerically: negative if `a` is older than `b`, 0 if they
+ * are equal, positive if newer. Missing parts count as 0 (`0.6` equals `0.6.0`) and a
+ * pre-release or local suffix is ignored (`0.5.35rc1` equals `0.5.35`). An unparseable
+ * version counts as `0`.
+ */
+export function compareVersions(a: string, b: string): number {
+  const pa = versionParts(a) ?? [0];
+  const pb = versionParts(b) ?? [0];
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return Math.sign(d);
+  }
+  return 0;
+}
+
+export type SidecarCompatibility =
+  /** Recent enough. */
+  | { kind: 'ok' }
+  /** Older than MIN_SIDECAR_VERSION, or it didn't say: warn, but run it. */
+  | { kind: 'outdated'; version?: string }
+  /** It speaks a protocol newer than this extension's: refuse it. */
+  | { kind: 'incompatible'; protocol: number };
+
+/** What the extension does with a sidecar, given its handshake (gh #89). */
+export function sidecarCompatibility(info: SidecarInfo): SidecarCompatibility {
+  const protocol = info.protocol ?? 1;
+  if (protocol > SUPPORTED_PROTOCOL) return { kind: 'incompatible', protocol };
+  const { version } = info;
+  if (version === undefined) return { kind: 'outdated' };
+  if (versionParts(version) === undefined || compareVersions(version, MIN_SIDECAR_VERSION) < 0) {
+    return { kind: 'outdated', version };
+  }
+  return { kind: 'ok' };
+}
+
+/**
+ * Whether the sidecar serves `capability`. A sidecar that lists no capabilities (older
+ * than 0.5.35, or not ready yet) is assumed to serve everything, as before gh #89.
+ */
+export function supports(info: SidecarInfo | undefined, capability: string): boolean {
+  return info?.capabilities === undefined || info.capabilities.includes(capability);
+}
+
+/** The startup error for a sidecar that speaks a newer protocol than this extension. */
+export function incompatibleSidecarMessage(python: string, info: SidecarInfo, protocol: number): string {
+  const which = info.version ? ` (${info.version})` : '';
+  return (
+    `The langstage-vscode sidecar in ${python}${which} speaks protocol ${protocol}, but this ` +
+    `version of the LangStage extension supports protocol ${SUPPORTED_PROTOCOL}. Update the ` +
+    `LangStage extension.`
+  );
+}
+
 interface QueuedTurn {
   sessionId: string;
   command: Record<string, unknown>;
@@ -143,6 +246,7 @@ export class SidecarClient {
   private active: QueuedTurn | undefined;
   private queue: QueuedTurn[] = [];
   private _status: SidecarStatus = { state: 'idle' };
+  private _info: SidecarInfo | undefined;
   private disposed = false;
   private readonly events = new EventEmitter();
 
@@ -150,6 +254,11 @@ export class SidecarClient {
 
   get status(): SidecarStatus {
     return { ...this._status };
+  }
+
+  /** The sidecar's `ready` handshake (gh #89); undefined until it is ready. */
+  get info(): SidecarInfo | undefined {
+    return this._info && { ...this._info };
   }
 
   /** True while the process is starting or ready (not failed, stopped or disposed). */
@@ -231,8 +340,11 @@ export class SidecarClient {
       return true;
     }
     if (this.active?.sessionId !== sessionId) return false;
-    if (!this.write({ type: 'cancel', session_id: sessionId })) {
-      // stdin is gone (the process is dying): end the turn here; the next one respawns.
+    // gh #89: send `cancel` only to a sidecar that serves it (or lists no capabilities, as
+    // one older than 0.5.35 does). One that doesn't could not stop the turn, and it would
+    // go on streaming into whatever turn came next. So, as when stdin is gone (the process
+    // is dying): end the turn here and stop the process; the next turn respawns.
+    if (!supports(this._info, 'cancel') || !this.write({ type: 'cancel', session_id: sessionId })) {
       const turn = this.active;
       this.active = undefined;
       turn.resolve(turn.result);
@@ -251,6 +363,14 @@ export class SidecarClient {
     } catch {
       /* ignore */
     }
+    this.killProcess();
+    if (this._status.state !== 'failed') this.setStatus({ state: 'stopped' });
+    this.events.removeAllListeners();
+  }
+
+  // ------------------------------------------------------------------ internals
+
+  private killProcess(): void {
     try {
       this.proc?.stdin?.write(JSON.stringify({ type: 'shutdown' }) + '\n');
     } catch {
@@ -261,11 +381,7 @@ export class SidecarClient {
     } catch {
       /* ignore */
     }
-    if (this._status.state !== 'failed') this.setStatus({ state: 'stopped' });
-    this.events.removeAllListeners();
   }
-
-  // ------------------------------------------------------------------ internals
 
   private setStatus(status: SidecarStatus): void {
     this._status = status;
@@ -310,14 +426,15 @@ export class SidecarClient {
     this.setStatus({ state: 'starting' });
 
     return new Promise<void>((resolve, reject) => {
-      const settle = (err?: Error, checkpointer?: CheckpointerInfo) => {
+      const settle = (err?: Error, ready?: { info: SidecarInfo; checkpointer?: CheckpointerInfo }) => {
         if (this.readySettled) return;
         this.readySettled = true;
         if (err) {
           this.setStatus({ state: 'failed', error: err.message, stderrTail: this.stderrTail || undefined });
           reject(err);
         } else {
-          this.setStatus({ state: 'ready', ...(checkpointer ? { checkpointer } : {}) });
+          const checkpointer = ready?.checkpointer;
+          this.setStatus({ state: 'ready', info: { ...ready?.info }, ...(checkpointer ? { checkpointer } : {}) });
           resolve();
         }
       };
@@ -362,10 +479,27 @@ export class SidecarClient {
           return; // non-JSON noise
         }
         if (!frame || typeof frame !== 'object' || typeof frame.type !== 'string') return;
-        // `ready` comes exactly once, at startup, and gates the first turn. It names the
-        // agent's checkpointer (gh #152), which the status carries.
+        // `ready` comes exactly once, at startup, and gates the first turn. It carries the
+        // handshake (gh #89) and names the agent's checkpointer (gh #152); the status
+        // carries both.
         if (frame.type === 'ready') {
-          settle(undefined, readyCheckpointer(frame));
+          if (this.readySettled) return;
+          const info = readyInfo(frame);
+          const compat = sidecarCompatibility(info);
+          if (compat.kind === 'incompatible') {
+            // A newer protocol may have removed or redefined what this extension sends:
+            // refuse the sidecar before any command reaches it, and stop the process.
+            settle(new Error(incompatibleSidecarMessage(python, info, compat.protocol)));
+            this.killProcess();
+            return;
+          }
+          this._info = info;
+          settle(undefined, { info, checkpointer: readyCheckpointer(frame) });
+          try {
+            this.options.onReady?.({ ...info });
+          } catch {
+            /* a notification bug must not wedge the first turn */
+          }
           this.pump();
           return;
         }

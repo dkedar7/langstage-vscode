@@ -211,6 +211,19 @@ the panel's reducer is the one place to change.
 - **No sidecar protocol change is required for v1.** One additive, optional change is
   planned: `ready` carrying `version` and `protocol` so the panel can warn about a
   sidecar that is too old. Clients already ignore unknown keys.
+  - *Handshake (gh #89, 2026-09-30):* done. Since sidecar 0.5.35 every `ready` carries
+    `version`, `protocol` (`1`, bumped only for a breaking change) and `capabilities`
+    (`message`, `decision`, `cancel`, `shutdown`, `checkpointer`: the additive channel),
+    also when the agent then fails to build; `--selfcheck --json` carries the same
+    fields. Extension 0.6.2 reads them in `SidecarClient`, which both surfaces share:
+    - a `protocol` newer than it supports **refuses** the sidecar (status `failed`,
+      "update the LangStage extension");
+    - a sidecar older than 0.5.35, or one that sends no `version`, gets a **warning**
+      (once per interpreter per activation, with a "Copy command" button for
+      `<python> -m pip install -U langstage-vscode`) and still runs;
+    - `cancel` is sent only when the sidecar lists it, or sends no `capabilities` (an
+      older sidecar, which does serve it). Otherwise Stop ends the turn locally and
+      stops that sidecar process, since nothing else can stop the turn.
 - **Duplication:** the port duplicates about 1,000 lines of web UI. The plan records the
   trigger for extracting a shared `@langstage/chat-ui` package (see Open questions)
   instead of doing it now.

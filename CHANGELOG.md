@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.2] - 2026-09-30
+
+Needs no new sidecar, but expects langstage-vscode 0.5.35 or newer and warns about an
+older one.
+
+### Added
+- **The extension checks which sidecar it spawned (gh #89).** It reads the handshake in the
+  sidecar's `ready` frame (sidecar 0.5.35) before it sends a command, in `SidecarClient`,
+  so the panel and `@langstage` both get it:
+  - **A newer protocol is refused.** A sidecar whose `protocol` is newer than the one this
+    extension supports (`1`) could have removed or redefined a command it sends, so it
+    doesn't start: the status is `failed` with, for example, *"The langstage-vscode sidecar
+    in python (0.7.0) speaks protocol 2, but this version of the LangStage extension
+    supports protocol 1. Update the LangStage extension."*, and the process is stopped.
+  - **An older sidecar gets a warning.** A sidecar older than 0.5.35, or one that doesn't
+    report its version (every release before 0.5.35), still runs, but a warning names the
+    interpreter and its version and offers a **Copy command** button for
+    `<python> -m pip install -U langstage-vscode`. It shows once per interpreter per
+    activation, however many sidecars the panel and `@langstage` start.
+  - **`cancel` only where it is served.** Stop sends `cancel` when the sidecar lists it in
+    its `capabilities`, or lists none (a sidecar older than 0.5.35, which serves it: no
+    change there). A sidecar that lists capabilities without `cancel` couldn't stop the
+    turn, so Stop ends the turn in the extension and stops that sidecar process instead.
+  - `SidecarClient` exposes the handshake as `info` and on its `ready` status, next to
+    `checkpointer`, and takes an `onReady` callback.
+
+## [0.5.35] - 2026-09-30
+
+No new langstage-core requirement.
+
+### Added
+- **`ready` carries a handshake (gh #89):** the sidecar's `version`, the `protocol` version
+  and its `capabilities`:
+  `{"type": "ready", "version": "0.5.35", "protocol": 1, "capabilities": ["message",
+  "decision", "cancel", "shutdown", "checkpointer"], "checkpointer": {...}}`. `protocol`
+  (`PROTOCOL_VERSION`) is bumped only for a breaking change: a command or frame removed or
+  redefined. `capabilities` (`CAPABILITIES`) is the additive channel: the commands the
+  stdio loop handles, plus `checkpointer` for the `ready` field gh #152 added. Every
+  `ready` carries the three, including the one written before the `error` frame when the
+  agent can't be built (which still has no `checkpointer`). The order of frames is
+  unchanged, and a client that ignores unknown keys is unaffected. `--selfcheck --json`
+  carries the same `version`, `protocol` and `capabilities`.
+
 ## [Extension 0.6.1] - 2026-09-30
 
 ### Changed

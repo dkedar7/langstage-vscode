@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { readLaunchConfig } from '../config';
+import { outdatedSidecarWarnings } from '../notices';
 import { HostToWebview } from '../shared/panelProtocol';
 import { SidecarClient, sidecarArgs, sidecarEnv } from '../sidecar';
 import { ConversationStore } from './conversationStore';
@@ -37,6 +38,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
           args: sidecarArgs(workspace, agentSpec, demo ? 'tools' : undefined),
           cwd: workspace,
           env: sidecarEnv(workspace),
+          // gh #89: warn (once per interpreter) about an outdated sidecar.
+          onReady: (info) => outdatedSidecarWarnings.check(python, info),
         });
       },
       agentSpec: () => readLaunchConfig().agentSpec,

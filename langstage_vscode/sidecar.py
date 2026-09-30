@@ -13,9 +13,13 @@ Commands (client -> sidecar), one JSON object per line:
     {"type": "shutdown"}
 
 Events (sidecar -> client), one JSON object per line:
-    {"type": "ready",                          # once, at startup; "checkpointer" is
+    {"type": "ready",                          # once, at startup (gh #89 handshake):
+     "version": "0.5.35",                      # this sidecar's __version__,
+     "protocol": 1,                            # PROTOCOL_VERSION (breaking changes),
+     "capabilities": ["message", ...],         # CAPABILITIES (additive features),
      "checkpointer": {"kind": "InMemorySaver", # the served agent's saver and whether
-                      "durable": false}}       # it survives a restart (gh #152)
+                      "durable": false}}       # it survives a restart (gh #152); absent
+                                               # when the agent could not be built
     {"type": "ack", "ref": "message|decision"} # command accepted
     <event_to_dict(...)>                       # content/tool_start/tool_end/
                                                # reasoning/extraction/interrupt
@@ -44,6 +48,45 @@ from langstage_core.console import safe_write
 from langstage_core.resume import normalize_decision
 
 DEFAULT_MAX_RESULT_LEN = 50_000
+
+# gh #89: the handshake every `ready` frame carries (with `version`, this package's
+# __version__), so the extension can tell which sidecar it spawned before it sends a
+# command. The two release independently, and `langstage.pythonPath` can point at any
+# installed langstage-vscode, however old or new.
+#
+# PROTOCOL_VERSION is the BREAKING-change channel. Bump it only for a change that would
+# break an extension written against the previous value: a command or frame removed or
+# redefined. Additive changes (a new command, frame or key) do not bump it; they are
+# announced in CAPABILITIES. The extension refuses a sidecar whose protocol is newer than
+# the one it supports.
+PROTOCOL_VERSION = 1
+
+# CAPABILITIES is the ADDITIVE channel: what this sidecar serves, by name, so a client can
+# feature-detect instead of inferring it from the version. Names are never reused for
+# something else; a feature that goes away is removed from the list.
+#   "message"      - the `message` command: run one turn of the agent.
+#   "decision"     - the `decision` command: answer a pending interrupt with one of the
+#                    verbs it allows (gh #117).
+#   "cancel"       - the `cancel` command: stop the session's in-flight turn
+#                    cooperatively (`cancelled -> turn_end`), keeping the session and its
+#                    memory (gh #67, #106).
+#   "shutdown"     - the `shutdown` command: end the loop; the process exits 0 (gh #151).
+#   "checkpointer" - `ready` reports the served agent's checkpointer (gh #152). It is
+#                    absent from a `ready` whose agent could not be built.
+CAPABILITIES = ("message", "decision", "cancel", "shutdown", "checkpointer")
+
+
+def _handshake() -> dict[str, Any]:
+    """The ``version`` / ``protocol`` / ``capabilities`` fields of ``ready`` and of the
+    ``--selfcheck --json`` verdict (gh #89)."""
+    from langstage_vscode import __version__  # the package imports this module first
+
+    return {
+        "version": __version__,
+        "protocol": PROTOCOL_VERSION,
+        "capabilities": list(CAPABILITIES),
+    }
+
 
 # Sentinel returned by the command intake when the input stream is exhausted (EOF /
 # closed stdin), so an ordinary line and "no more commands" are never confused.
@@ -307,9 +350,11 @@ def run(
     # the served agent actually uses (its own, or the in-memory one core attaches when
     # the graph has none) and whether it survives a restart. The panel uses it to decide
     # whether a restored transcript needs the "may not remember" note. A graph that
-    # could not be built has no checkpointer to report: `ready` is then bare, followed
-    # by the `error` frame, in the same order as before.
-    ready: dict[str, Any] = {"type": "ready"}
+    # could not be built has no checkpointer to report: `ready` then has only the
+    # handshake, followed by the `error` frame, in the same order as before.
+    # gh #89: every `ready` carries the handshake (version, protocol, capabilities), so
+    # the extension can check the sidecar even when the agent itself is broken.
+    ready: dict[str, Any] = {"type": "ready", **_handshake()}
     if agui_agent is not None:
         ready["checkpointer"] = _checkpointer_info(agui_agent)
     emit(ready)
@@ -848,7 +893,11 @@ def _selfcheck(
         # verdict so a FAIL says WHERE, not just what — a "traceback" field in --json (CI can
         # log it) and printed under the FAIL line in text mode. Absent otherwise.
         if as_json:
-            payload = {"type": "selfcheck", "ok": ok, "spec": spec, "message": msg}
+            # gh #89: the same version / protocol / capabilities as the `ready` handshake,
+            # so a script can check them without driving the stdio loop.
+            payload = {
+                "type": "selfcheck", "ok": ok, "spec": spec, "message": msg, **_handshake(),
+            }
             if demo_fallback:
                 payload["demo_fallback"] = True
             if traceback:

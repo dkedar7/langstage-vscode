@@ -59,11 +59,12 @@ def test_a_persistent_saver_is_durable():
     }
 
 
-def test_a_graph_that_cannot_be_served_gets_a_bare_ready_then_the_error():
+def test_a_graph_that_cannot_be_served_gets_a_ready_without_checkpointer_then_the_error():
     out = io.StringIO()
     run(lambda: None, io.StringIO(""), out)
     frames = [json.loads(ln) for ln in out.getvalue().splitlines() if ln.strip()]
-    assert frames[0] == {"type": "ready"}
+    # Only the gh #89 handshake: no checkpointer to report.
+    assert frames[0]["type"] == "ready" and "checkpointer" not in frames[0]
     assert frames[1]["type"] == "error" and "not a runnable graph" in frames[1]["error"]
 
 
@@ -100,4 +101,4 @@ def test_selfcheck_json_carries_the_checkpointer(monkeypatch, tmp_path, capsys):
 
 def test_the_readme_documents_the_field():
     text = README.read_text(encoding="utf-8")
-    assert '{"type": "ready", "checkpointer": {"kind":' in text
+    assert '"checkpointer": {"kind": "InMemorySaver", "durable": false}}' in text
