@@ -96,6 +96,44 @@ test('gh #152: the status forwards the checkpointer from the ready frame', async
   session.dispose();
 });
 
+test('gh #89: a sidecar with a newer protocol shows as failed, and a sent message gets the reason', async () => {
+  const { session, posted, procs } = setup();
+  session.handle({ v: 1, type: 'ui/ready' });
+  const id = restoreOf(posted).activeId;
+  session.handle({ v: 1, type: 'send', conversationId: id, text: 'hello' });
+  await tick();
+  procs[0].emitFrames([{ type: 'ready', version: '0.9.0', protocol: 2, capabilities: ['message'] }]);
+  await tick();
+  await tick();
+  const statuses = posted.flatMap((m) => (m.type === 'status' ? [m.status] : []));
+  const last = statuses[statuses.length - 1];
+  assert.equal(last.phase, 'failed');
+  assert.match(last.error ?? '', /speaks protocol 2.*Update the LangStage extension/);
+  assert.equal(last.noAgent, false);
+  assert.deepEqual(procs[0].commands.map((c) => c.type), ['shutdown'], 'the message never reached it');
+  const errors = posted.flatMap((m) => (m.type === 'frame' && m.frame.type === 'error' ? [m.frame] : []));
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0].error), /speaks protocol 2/);
+  assert.ok(posted.some((m) => m.type === 'turn/ended' && m.conversationId === id));
+  session.dispose();
+});
+
+test('gh #89: Stop on a sidecar that does not list cancel ends the turn without a cancel command', async () => {
+  const { session, posted, procs } = setup();
+  session.handle({ v: 1, type: 'ui/ready' });
+  const id = restoreOf(posted).activeId;
+  procs[0].emitFrames([{ type: 'ready', version: '0.5.35', protocol: 1, capabilities: ['message', 'shutdown'] }]);
+  await tick();
+  session.handle({ v: 1, type: 'send', conversationId: id, text: 'hello' });
+  await tick();
+  session.handle({ v: 1, type: 'cancel', conversationId: id });
+  await tick();
+  await tick();
+  assert.deepEqual(procs[0].commands.map((c) => c.type), ['message', 'shutdown']);
+  assert.ok(posted.some((m) => m.type === 'turn/ended' && m.conversationId === id));
+  session.dispose();
+});
+
 test('a second send while the turn is in flight is ignored', async () => {
   const { session, posted, procs } = setup();
   session.handle({ v: 1, type: 'ui/ready' });

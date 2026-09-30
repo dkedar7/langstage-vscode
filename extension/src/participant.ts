@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'crypto';
 import { readLaunchConfig } from './config';
+import { outdatedSidecarWarnings } from './notices';
 import {
   PendingInterrupt,
   buildDecisions,
@@ -179,6 +180,8 @@ function getOrCreateClient(python: string, agentSpec: string, workspace: string)
     args: sidecarArgs(workspace, agentSpec),
     cwd: workspace,
     env: sidecarEnv(workspace),
+    // gh #89: warn (once per interpreter) about an outdated sidecar.
+    onReady: (info) => outdatedSidecarWarnings.check(python, info),
   });
   client = { sc, key };
   return sc;

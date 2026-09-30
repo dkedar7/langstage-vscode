@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { affectsLaunch } from './config';
+import { outdatedSidecarWarnings } from './notices';
 import { PanelController, VIEW_ID } from './panel/PanelController';
 import { ANSWER_COMMAND, disposeParticipantSidecar, handler } from './participant';
 
@@ -17,6 +18,8 @@ import { ANSWER_COMMAND, disposeParticipantSidecar, handler } from './participan
  * configured agent executes workspace code, so it stays disabled in Restricted Mode.
  */
 export function activate(context: vscode.ExtensionContext): { panel: PanelController } {
+  // An outdated sidecar is warned about once per interpreter per activation (gh #89).
+  outdatedSidecarWarnings.reset();
   const panel = PanelController.register(context);
 
   context.subscriptions.push(
