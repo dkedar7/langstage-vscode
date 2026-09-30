@@ -6,6 +6,8 @@
   ``extraction`` frame for the extension's Tasks checklist.
 - gh #102: the README's Events list omitted frames the sidecar emits.
 - gh #130: ``--selfcheck`` reported an interrupt-paused agent as healthy.
+- gh #155: its PAUSED verdict then said approval was not wired into the chat UI, which
+  extension 0.6.0 made untrue.
 """
 
 import json
@@ -150,6 +152,11 @@ def test_selfcheck_reports_an_interrupt_pause_distinctly(monkeypatch, tmp_path, 
     assert rc == 2, verdict  # the same "paused awaiting a decision" code as --message
     assert verdict["ok"] is False and verdict["interrupt"] is True, verdict
     assert "interrupt" in verdict["message"], verdict
+    # gh #155: the editor answers the pause since extension 0.6.0; the message says
+    # where, instead of claiming approval is not wired into the chat UI.
+    assert "not wired" not in verdict["message"], verdict
+    assert "approval card" in verdict["message"] and "@langstage" in verdict["message"]
+    assert ":decision <verb>" in verdict["message"], verdict
 
 
 def test_selfcheck_interrupt_text_mode(monkeypatch, tmp_path, capsys):
@@ -159,6 +166,8 @@ def test_selfcheck_interrupt_text_mode(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert err.startswith("PAUSED: "), err
+    assert "not wired" not in err and "approval card" in err, err  # gh #155
+    assert err.isascii(), err  # the verdict goes to a possibly-cp1252 stderr
 
 
 def test_selfcheck_healthy_agent_is_still_ok(monkeypatch, tmp_path, capsys):

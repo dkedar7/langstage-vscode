@@ -188,8 +188,12 @@ runnable graph, drives one turn, and exits `0` (healthy) / non-zero with a preci
 message (add `--json` for a machine-readable verdict). If that turn pauses on a
 human-in-the-loop interrupt instead of replying, the verdict is `PAUSED:` (`"ok": false,
 "interrupt": true` in `--json`) with exit `2`, the code `--message` uses for a pause.
-In the chat, such an agent asks for your decision on its first `@langstage` turn (see
-[Answering an interrupt](#answering-an-interrupt-from-the-chat)):
+Such an agent works in the editor: it asks for your decision on its first turn, as an
+approval card in the LangStage panel or as decision buttons under `@langstage` (see
+[Answering an interrupt](#answering-an-interrupt-from-the-chat)). From the CLI, `--repl`
+answers it with `:decision <verb>`. The `--json` verdict also carries `checkpointer`,
+the served agent's checkpointer as the `ready` frame reports it (see
+[Sidecar protocol](#sidecar-protocol)):
 
 ```bash
 langstage-vscode-sidecar --selfcheck                       # validate the runtime via the demo stub

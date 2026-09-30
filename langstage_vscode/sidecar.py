@@ -952,15 +952,19 @@ def _selfcheck(
         )
 
     # gh #130: an interrupt turn still ends `complete -> turn_end`, but the agent paused
-    # without replying. Interactive approval is not wired into the chat UI yet, so this
-    # agent would leave the chat panel waiting on its first turn. Report the pause as its
-    # own verdict: ok false, "interrupt": true, exit 2 (the code --message uses for it).
+    # without replying. Report the pause as its own verdict: ok false, "interrupt": true,
+    # exit 2 (the code --message uses for it), so a script can tell it from a reply.
+    # gh #155: since extension 0.6.0 the editor can answer the pause (the panel's
+    # approval card, @langstage's decision buttons), so the message says where it is
+    # answered instead of claiming approval is not wired into the chat UI. ASCII only:
+    # the text verdict goes to a stderr that may be cp1252.
     if "interrupt" in types:
         return verdict(
             False,
-            f"agent spec {spec!r} paused on a human-in-the-loop interrupt instead of "
-            "replying. Interactive approval is not wired into the chat UI yet, so this "
-            "agent will wait on its first @langstage turn.",
+            f"agent spec {spec!r} paused on a human-in-the-loop interrupt on its first "
+            "turn instead of replying. In the editor, the LangStage panel shows an "
+            "approval card to answer it, and @langstage shows decision buttons (Approve, "
+            "Reject, ...); from the CLI, --repl answers it inline with `:decision <verb>`.",
             paused=True,
         )
 
