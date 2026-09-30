@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.1] - 2026-09-30
+
+### Changed
+- **The "may not remember" note shows only when memory was lost (gh #152).** The panel marks
+  a restored conversation (and every sidecar restart) with *"The agent may not remember the
+  conversation above"*. It now reads the checkpointer the sidecar reports in its `ready`
+  frame (sidecar 0.5.34) and leaves the note out when it is durable (`SqliteSaver`,
+  `PostgresSaver`, ...), since that agent still has the conversation. With an in-memory
+  checkpointer, before the sidecar is ready, or with an older sidecar that doesn't report
+  one, the note is shown as before. `SidecarClient`'s `ready` status and the panel's
+  `status` message carry the new `checkpointer` field.
+
+## [0.5.34] - 2026-09-30
+
+No new langstage-core requirement.
+
+### Fixed
+- **`shutdown` exits 0 (gh #151).** With stdin still open after `{"type": "shutdown"}`
+  (the extension host keeps the pipe open until the process exits), the sidecar aborted at
+  exit with `Fatal Python error: _enter_buffered_busy ... possibly due to daemon threads`:
+  exit 134 (SIGABRT) on Linux, an access violation on Windows, every time. The daemon
+  thread that reads commands was blocked inside `sys.stdin.buffer` holding its lock when
+  the interpreter finalized. It now reads the unbuffered `sys.stdin.buffer.raw`, which has
+  no such lock, so shutdown is a normal interpreter exit: exit 0, every frame already
+  flushed, and atexit handlers (tracing flushes, a checkpointer's cleanup) still run. The
+  EOF path was already clean and is unchanged.
+- **`--selfcheck`'s PAUSED verdict no longer says approval is unwired (gh #155).** It said
+  "Interactive approval is not wired into the chat UI yet, so this agent will wait on its
+  first @langstage turn", which extension 0.6.0 made untrue. It now says the agent paused
+  on a human-in-the-loop interrupt on its first turn, that the LangStage panel shows an
+  approval card for it and `@langstage` decision buttons, and that `--repl` answers it with
+  `:decision <verb>`. Exit `2`, `"ok": false` and `"interrupt": true` are unchanged.
+
+### Added
+- **`ready` reports the agent's checkpointer (gh #152):**
+  `{"type": "ready", "checkpointer": {"kind": "InMemorySaver", "durable": false}}`. `kind`
+  is the class name of the saver turns actually run with (read from the built agent, so
+  the in-memory one core attaches to a graph compiled without one shows as
+  `InMemorySaver`); `durable` is false for an in-memory saver or none, true for any other
+  (`SqliteSaver`, `PostgresSaver`, ...). The agent is now built before `ready` is written;
+  an agent that can't be built still gets a bare `ready` and then the `error` frame, as
+  before. `--selfcheck --json` carries the same `checkpointer` object. `--show-config` does
+  not, because it never loads the agent.
+
 ## [Extension 0.6.0] - 2026-09-26
 
 The LangStage panel (still a preview) answers approvals, keeps several conversations and
