@@ -444,8 +444,12 @@ python -m langstage_vscode --demo=tools
 {"type": "message",  "session_id": "s1", "content": "hello"}
 {"type": "decision", "session_id": "s1", "decisions": [{"type": "approve"}]}
 {"type": "cancel",   "session_id": "s1"}   // abort the in-flight turn, keep the session
-{"type": "shutdown"}
+{"type": "shutdown"}                        // end the loop; the process exits 0
 ```
+
+`shutdown` and closing stdin both end the loop with exit `0`. A client does not have to
+close stdin after `shutdown`; the extension keeps the pipe open until the process exits
+(gh #151).
 
 **Decision verbs.** Each entry in `decisions` needs a string `type`, and that verb must
 be one the pending `interrupt` frame lists in `allowed_decisions`. The advertised verbs

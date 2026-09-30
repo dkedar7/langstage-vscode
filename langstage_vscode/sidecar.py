@@ -27,7 +27,7 @@ import argparse
 import json
 import os
 from collections import deque
-from typing import Any, Callable, Iterable, TextIO
+from typing import Any, Callable, Iterable, Iterator, TextIO
 
 from langstage_core import apply_workspace, load_agent_spec, workspace_root
 # Console-safe writes (gh #42/#51): the extension spawns the sidecar over a cp1252 pipe
@@ -99,6 +99,59 @@ class _ReadFailure:
 
     def __init__(self, error: str) -> None:
         self.error = error
+
+
+def _raw_lines(read: Callable[[int], bytes | None], chunk_size: int = 65536) -> Iterator[bytes]:
+    """``bytes`` lines split out of the chunks an UNBUFFERED ``read(n)`` returns.
+
+    The raw stdio loop reads its commands through this, over ``sys.stdin.buffer.raw``,
+    rather than by iterating ``sys.stdin.buffer`` (gh #151). The background reader
+    thread (see ``_CommandIntake``) is a daemon, and after a ``shutdown`` command it is
+    still blocked waiting for the next line, because the extension host keeps the pipe
+    open until the process exits. Blocked inside a ``BufferedReader`` read, it held that
+    object's internal lock, and when the interpreter finalized ``sys.stdin`` it could not
+    take the lock: ``Fatal Python error: _enter_buffered_busy ... possibly due to daemon
+    threads``, SIGABRT (134) on Linux, an access violation on Windows, instead of exit 0.
+    The raw stream under the buffer (a ``FileIO``, or the Windows console reader) has no
+    such lock: while it waits it has only released the GIL, so finalization runs
+    normally. ``shutdown`` exits 0, with every frame already flushed (``emit`` flushes
+    each one) and atexit handlers (tracing flushes, a checkpointer's cleanup) still run.
+
+    The alternative, ``os._exit(0)`` on shutdown, would also stop the abort, but it skips
+    those atexit handlers, and it can't be called from ``run()``, which tests and other
+    in-process callers drive.
+
+    Each ``read`` returns whatever is available (one system call), so a command is
+    handed on as soon as its line is complete. Lines keep their ``\\n``; at EOF a final
+    unterminated line is still returned."""
+    pending: list[bytes] = []
+    while True:
+        data = read(chunk_size)
+        if data is None:  # only a non-blocking stream does this; stdin never is
+            raise BlockingIOError("stdin is in non-blocking mode")
+        if not data:
+            break
+        start = 0
+        while (nl := data.find(b"\n", start)) >= 0:
+            pending.append(data[start : nl + 1])
+            yield b"".join(pending)
+            pending.clear()
+            start = nl + 1
+        if start < len(data):
+            pending.append(data[start:])
+    if pending:
+        yield b"".join(pending)
+
+
+def _stdin_lines(stdin: Any) -> Iterable[Any]:
+    """The raw stdio loop's command source, as undecoded UTF-8 bytes (gh #119): lines
+    read from the unbuffered raw stream under ``stdin`` (gh #151, see ``_raw_lines``).
+    A stream without one (a test double) is used as is: its binary ``.buffer`` if it
+    has one, else the stream itself."""
+    raw = getattr(getattr(stdin, "buffer", None), "raw", None)
+    if raw is not None and callable(getattr(raw, "read", None)):
+        return _raw_lines(raw.read)
+    return getattr(stdin, "buffer", stdin)
 
 
 class _CommandIntake:
@@ -1823,10 +1876,14 @@ def main(argv: list[str] | None = None) -> int:
     # gh #119/#136: read the BINARY stdin and decode each line as UTF-8 in the intake.
     # The text stdin decodes with the pipe's locale encoding (cp1252 on Western
     # Windows), which turned non-ASCII input into mojibake and crashed the reader on a
-    # byte cp1252 leaves undefined. A stream without `.buffer` (a test double) is used
+    # byte cp1252 leaves undefined.
+    # gh #151: the bytes come from the unbuffered sys.stdin.buffer.raw, not through the
+    # buffer, so the reader thread still blocked on the open pipe after a `shutdown`
+    # holds no buffer lock when the interpreter finalizes (see _raw_lines): `shutdown`
+    # exits 0 instead of aborting. A stream without a raw layer (a test double) is used
     # as-is.
     run(
-        graph, getattr(sys.stdin, "buffer", sys.stdin), sys.stdout, spec=spec,
+        graph, _stdin_lines(sys.stdin), sys.stdout, spec=spec,
         enable_cancel=True, extractors=extractors, configurable=configurable,
     )
     return 0
