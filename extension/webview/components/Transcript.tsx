@@ -20,9 +20,12 @@ function firstReplyOfTurn(conv: ConversationView, index: number): boolean {
 
 export function Transcript({
   conv,
+  memoryDurable,
   onDecide,
 }: {
   conv: ConversationView;
+  /** The agent's checkpointer is durable, so a restart didn't lose its memory (gh #152). */
+  memoryDurable: boolean;
   onDecide: (decisions: Array<Record<string, unknown>>) => void;
 }) {
   const end = useRef<HTMLDivElement>(null);
@@ -82,10 +85,13 @@ export function Transcript({
               />
             );
           case 'memoryReset':
+            // A durable checkpointer (SqliteSaver, PostgresSaver, ...) still has the
+            // conversation after the restart, so there is nothing to warn about.
+            if (memoryDurable) return null;
             return (
               <div key={item.key} className="ls-memory-reset" role="note">
                 <strong>The agent may not remember the conversation above.</strong> Its process
-                restarted, and with the default in-memory checkpointer its memory went with it.
+                restarted, and with an in-memory checkpointer its memory went with it.
                 Configure a durable checkpointer to keep memory across restarts.
               </div>
             );

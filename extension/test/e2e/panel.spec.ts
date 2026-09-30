@@ -202,8 +202,24 @@ test('restore after a reload: the transcript comes back, flagged as not in agent
   await expect(page.locator('.ls-tool-name')).toHaveText('demo_lookup');
   await expect(lastReply(page)).toContainText('The demo tool returned');
   await expect(page.getByRole('note')).toContainText('The agent may not remember the conversation above');
-  // The restored conversation keeps working.
   await expect(page.getByRole('status').filter({ hasText: 'Ready' })).toBeVisible({ timeout: 60_000 });
+  // gh #152: the new sidecar's `ready` names its checkpointer. The demo runs on the
+  // in-memory one core attaches, so the note stays after it is known.
+  const status = [...r.posted].reverse().find((m) => m.type === 'status') as
+    | { status: Record<string, unknown> }
+    | undefined;
+  expect(status?.status.checkpointer).toEqual({ kind: 'InMemorySaver', durable: false });
+  await expect(page.getByRole('note')).toContainText('The agent may not remember the conversation above');
+  // What the host posts for an agent with a durable checkpointer (e.g. SqliteSaver): the
+  // note goes, since that agent still has the conversation.
+  await page.evaluate((m) => window.postMessage(m, '*'), {
+    v: 1,
+    type: 'status',
+    status: { ...status?.status, checkpointer: { kind: 'SqliteSaver', durable: true } },
+  });
+  await expect(page.getByRole('note')).toHaveCount(0);
+  await expect(page.locator('.ls-msg-user')).toContainText('please use a tool');
+  // The restored conversation keeps working.
   await send(page, 'think about it');
   await expect(lastReply(page)).toContainText('Done reasoning');
 });

@@ -5,7 +5,7 @@ import { ConversationList } from './components/ConversationList';
 import { StatusLine } from './components/StatusLine';
 import { TodoList } from './components/TodoList';
 import { Transcript } from './components/Transcript';
-import { initialState, pendingInterrupt, reduce } from './state/reducer';
+import { initialState, memoryIsDurable, pendingInterrupt, reduce } from './state/reducer';
 import { post } from './vscodeApi';
 
 function isHostMessage(data: unknown): data is HostToWebview {
@@ -51,6 +51,7 @@ export function App() {
           {conv.todos && conv.todos.length > 0 && <TodoList todos={conv.todos} />}
           <Transcript
             conv={conv}
+            memoryDurable={memoryIsDurable(state.status)}
             onDecide={(decisions) => post({ type: 'decide', conversationId: conv.id, decisions })}
           />
           <Composer

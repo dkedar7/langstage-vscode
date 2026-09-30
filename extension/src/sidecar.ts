@@ -26,12 +26,22 @@ export interface SidecarFrame {
 
 export type SidecarState = 'idle' | 'starting' | 'ready' | 'failed' | 'stopped';
 
+/** The checkpointer the sidecar's agent runs with, from its `ready` frame (gh #152). */
+export interface CheckpointerInfo {
+  /** The saver's class name, e.g. `InMemorySaver`; null when there is none. */
+  kind: string | null;
+  /** Its threads outlive the sidecar process, so a restart keeps the agent's memory. */
+  durable: boolean;
+}
+
 export interface SidecarStatus {
   state: SidecarState;
   /** The startup error: the pre-`ready` `error` frame's text, or the last stderr line. */
   error?: string;
   /** The last few KB of stderr, for a failed or stopped sidecar. */
   stderrTail?: string;
+  /** For `ready`: the agent's checkpointer. Absent from a sidecar older than 0.5.34. */
+  checkpointer?: CheckpointerInfo;
 }
 
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -100,6 +110,18 @@ export function sidecarEnv(workspace: string, base: NodeJS.ProcessEnv = process.
 /** The startup error the sidecar reports when no agent is configured (gh #121/#131). */
 export function isNoAgentError(error: string | undefined): boolean {
   return !!error && /^no agent spec\b/i.test(error.trim());
+}
+
+/**
+ * The `checkpointer` of a `ready` frame (sidecar 0.5.34+, gh #152), or undefined when
+ * it is absent (an older sidecar, or an agent that could not be built) or malformed.
+ */
+export function readyCheckpointer(frame: SidecarFrame): CheckpointerInfo | undefined {
+  const c = frame.checkpointer;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return undefined;
+  const { kind, durable } = c as Record<string, unknown>;
+  if (typeof durable !== 'boolean') return undefined;
+  return { kind: typeof kind === 'string' ? kind : null, durable };
 }
 
 interface QueuedTurn {
@@ -288,14 +310,14 @@ export class SidecarClient {
     this.setStatus({ state: 'starting' });
 
     return new Promise<void>((resolve, reject) => {
-      const settle = (err?: Error) => {
+      const settle = (err?: Error, checkpointer?: CheckpointerInfo) => {
         if (this.readySettled) return;
         this.readySettled = true;
         if (err) {
           this.setStatus({ state: 'failed', error: err.message, stderrTail: this.stderrTail || undefined });
           reject(err);
         } else {
-          this.setStatus({ state: 'ready' });
+          this.setStatus({ state: 'ready', ...(checkpointer ? { checkpointer } : {}) });
           resolve();
         }
       };
@@ -340,9 +362,10 @@ export class SidecarClient {
           return; // non-JSON noise
         }
         if (!frame || typeof frame !== 'object' || typeof frame.type !== 'string') return;
-        // `ready` comes exactly once, at startup, and gates the first turn.
+        // `ready` comes exactly once, at startup, and gates the first turn. It names the
+        // agent's checkpointer (gh #152), which the status carries.
         if (frame.type === 'ready') {
-          settle();
+          settle(undefined, readyCheckpointer(frame));
           this.pump();
           return;
         }

@@ -80,6 +80,22 @@ test('send → queued → started → frames forwarded verbatim → ended; the l
   session.dispose();
 });
 
+test('gh #152: the status forwards the checkpointer from the ready frame', async () => {
+  const { session, posted, procs } = setup();
+  session.handle({ v: 1, type: 'ui/ready' });
+  await tick();
+  procs[0].emitFrames([{ type: 'ready', checkpointer: { kind: 'PostgresSaver', durable: true } }]);
+  await tick();
+  const last = posted[posted.length - 1];
+  assert.ok(last.type === 'status');
+  assert.equal(last.status.phase, 'ready');
+  assert.deepEqual(last.status.checkpointer, { kind: 'PostgresSaver', durable: true });
+  // It is also in the status a rebuilt webview gets back.
+  session.handle({ v: 1, type: 'ui/ready' });
+  assert.deepEqual(restoreOf(posted).status.checkpointer, { kind: 'PostgresSaver', durable: true });
+  session.dispose();
+});
+
 test('a second send while the turn is in flight is ignored', async () => {
   const { session, posted, procs } = setup();
   session.handle({ v: 1, type: 'ui/ready' });

@@ -11,6 +11,7 @@ import {
   PanelState,
   emptyConversation,
   initialState,
+  memoryIsDurable,
   normalizeTodos,
   pendingInterrupt,
   reduce,
@@ -228,4 +229,19 @@ test('restore keeps a turn in flight streaming; an interrupt stays pending until
   assert.ok(pendingInterrupt(busy.conversations[C]), 'still pending while the answer is in flight');
   const acked = reduce(busy, { v: 1, type: 'frame', conversationId: C, frame: { type: 'ack', ref: 'decision' } });
   assert.equal(pendingInterrupt(acked.conversations[C]), undefined);
+});
+
+test('gh #152: memory is durable only when the ready frame said so', () => {
+  assert.equal(memoryIsDurable({ phase: 'ready', checkpointer: { kind: 'SqliteSaver', durable: true } }), true);
+  assert.equal(memoryIsDurable({ phase: 'ready', checkpointer: { kind: 'InMemorySaver', durable: false } }), false);
+  // An older sidecar reports nothing, and a starting one hasn't yet: keep the note.
+  assert.equal(memoryIsDurable({ phase: 'ready' }), false);
+  assert.equal(memoryIsDurable({ phase: 'starting' }), false);
+  // The status message carries it into the state the Transcript reads.
+  const s = reduce(restored(), {
+    v: 1,
+    type: 'status',
+    status: { phase: 'ready', checkpointer: { kind: 'SqliteSaver', durable: true } },
+  });
+  assert.equal(memoryIsDurable(s.status), true);
 });

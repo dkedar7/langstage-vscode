@@ -13,7 +13,9 @@ Commands (client -> sidecar), one JSON object per line:
     {"type": "shutdown"}
 
 Events (sidecar -> client), one JSON object per line:
-    {"type": "ready"}                          # once, at startup
+    {"type": "ready",                          # once, at startup; "checkpointer" is
+     "checkpointer": {"kind": "InMemorySaver", # the served agent's saver and whether
+                      "durable": false}}       # it survives a restart (gh #152)
     {"type": "ack", "ref": "message|decision"} # command accepted
     <event_to_dict(...)>                       # content/tool_start/tool_end/
                                                # reasoning/extraction/interrupt
@@ -284,8 +286,6 @@ def run(
         stdout.write(json.dumps(obj) + "\n")
         stdout.flush()
 
-    emit({"type": "ready"})
-
     # The spec loaded, but if it isn't a runnable graph (a factory function, an
     # uncompiled StateGraph, a bare value), core's build_agent blows up deep inside
     # ag-ui with a raw `AttributeError: 'function' object has no attribute 'nodes'`
@@ -294,16 +294,27 @@ def run(
     # with the same actionable message `--selfcheck` gives, so the runtime path
     # degrades to a frame instead of a crash on this documented footgun.
     graph_error = _runnable_graph_error(graph, spec)
+    agui_agent: Any = None
+    if graph_error is None:
+        from .agui_stream import build_session_agent
+
+        try:
+            agui_agent = build_session_agent(graph, configurable=configurable)
+        except Exception as exc:  # noqa: BLE001 — any build failure becomes an error frame, not a crash
+            graph_error = f"{type(exc).__name__}: {exc}"
+
+    # gh #152: the agent is built before `ready`, so `ready` can say which checkpointer
+    # the served agent actually uses (its own, or the in-memory one core attaches when
+    # the graph has none) and whether it survives a restart. The panel uses it to decide
+    # whether a restored transcript needs the "may not remember" note. A graph that
+    # could not be built has no checkpointer to report: `ready` is then bare, followed
+    # by the `error` frame, in the same order as before.
+    ready: dict[str, Any] = {"type": "ready"}
+    if agui_agent is not None:
+        ready["checkpointer"] = _checkpointer_info(agui_agent)
+    emit(ready)
     if graph_error is not None:
         emit({"type": "error", "error": graph_error})
-        return
-
-    from .agui_stream import build_session_agent
-
-    try:
-        agui_agent = build_session_agent(graph, configurable=configurable)
-    except Exception as exc:  # noqa: BLE001 — any build failure becomes an error frame, not a crash
-        emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
         return
 
     intake = _CommandIntake(stdin, enabled=enable_cancel)
@@ -522,6 +533,31 @@ class _VersionAction(argparse.Action):
 
         safe_write(f"langstage-vscode-sidecar {__version__} ({_runtime_versions()})\n")
         parser.exit()
+
+
+def _checkpointer_info(agent: Any) -> dict[str, Any]:
+    """The checkpointer the served agent uses, for the ``ready`` frame (gh #152).
+
+    ``{"kind": <class name or None>, "durable": <bool>}``, read from the built agent's
+    graph, so it reports what turns actually run with: the agent's own checkpointer,
+    or the ``InMemorySaver`` core's ``build_agent`` attaches to a graph compiled without
+    one. An in-memory saver (``InMemorySaver`` / its ``MemorySaver`` alias, or any class
+    named like one) loses its threads when the process ends, so it is not durable; no
+    saver at all (``None``, or LangGraph's ``True``/``False`` flags) is not durable
+    either. Anything else (``SqliteSaver``, ``PostgresSaver``, ...) is taken to persist
+    its threads outside the process."""
+    saver = getattr(getattr(agent, "graph", None), "checkpointer", None)
+    if saver is None or isinstance(saver, bool):
+        return {"kind": None, "durable": False}
+    kind = type(saver).__name__
+    in_memory = "memory" in kind.lower()
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        in_memory = in_memory or isinstance(saver, InMemorySaver)
+    except ImportError:  # pragma: no cover - langgraph is a core dependency
+        pass
+    return {"kind": kind, "durable": not in_memory}
 
 
 # ``_thread_head`` result meaning "don't roll back": the turn is not a cancellable
@@ -800,6 +836,10 @@ def _selfcheck(
 
     from langstage_vscode import __version__
 
+    # gh #152: the served agent's checkpointer, from the preflight turn's `ready` frame,
+    # added to the --json verdict once the agent has been built.
+    checkpointer: dict[str, Any] | None = None
+
     def verdict(
         ok: bool, msg: str, traceback: str | None = None, *, paused: bool = False
     ) -> int:
@@ -815,6 +855,8 @@ def _selfcheck(
                 payload["traceback"] = traceback
             if paused:
                 payload["interrupt"] = True
+            if checkpointer is not None:
+                payload["checkpointer"] = checkpointer
             sys.stdout.write(json.dumps(payload) + "\n")
             sys.stdout.flush()
         else:
@@ -891,6 +933,10 @@ def _selfcheck(
     run(graph, iter(commands), out, configurable=configurable)
     frames = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
     types = [f.get("type") for f in frames]
+    checkpointer = next(
+        (f["checkpointer"] for f in frames if f.get("type") == "ready" and "checkpointer" in f),
+        None,
+    )
 
     if "error" in types:
         err_frame = next(f for f in frames if f.get("type") == "error")
