@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -18,6 +19,8 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 import langstage_vscode
 from langstage_vscode.sidecar import CAPABILITIES, PROTOCOL_VERSION, main, run
 from tests.test_sidecar import _isolate_config
+
+README = Path(__file__).resolve().parent.parent / "README.md"
 
 EXPECTED_CAPABILITIES = ["message", "decision", "cancel", "shutdown", "checkpointer"]
 
@@ -144,3 +147,10 @@ def test_the_real_sidecar_process_sends_the_handshake_first(tmp_path):
     _assert_handshake(first)
     assert first["checkpointer"] == {"kind": "InMemorySaver", "durable": False}
 
+
+def test_the_readme_documents_the_handshake():
+    text = README.read_text(encoding="utf-8")
+    assert '"protocol": 1' in text
+    assert '"capabilities": ["message", "decision", "cancel", "shutdown", "checkpointer"]' in text
+    for cap in EXPECTED_CAPABILITIES:
+        assert f"`{cap}`" in text, cap

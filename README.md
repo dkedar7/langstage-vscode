@@ -99,6 +99,12 @@ langstage-agui --agent my_agent.py:graph
 pip install langstage-vscode
 ```
 
+Install it into the interpreter `langstage.pythonPath` points at (see [Configure](#configure)).
+The extension (0.6.2+) expects langstage-vscode **0.5.35 or newer** there. It still runs an
+older one, but warns that some features may not work and offers the upgrade command for
+that interpreter (`<python> -m pip install -U langstage-vscode`); see
+[the `ready` handshake](#sidecar-protocol).
+
 `--demo` (the keyless echo stub) runs on this base install — since 0.5.0 the base
 deps pull the AG-UI runtime, which brings `langgraph`, so no extra is needed.
 Pass **`--demo=tools`** for the rich-frame demo that exercises
@@ -379,7 +385,9 @@ against the real sidecar running `--demo=tools`. No Copilot, no API key.*
   can't be answered after a reload; send a new message instead.
 - The status line shows the sidecar starting, ready, or failed with its startup error. With no
   agent configured it offers **Open settings** and **Try the demo** (the keyless
-  `--demo=tools` agent, for that session only).
+  `--demo=tools` agent, for that session only). A sidecar that speaks a newer protocol than
+  the extension also fails to start, and says to update the extension (0.6.2+, see
+  [the `ready` handshake](#sidecar-protocol)).
 - Agent output is untrusted: raw HTML is never rendered, and a link opens only after you
   confirm it. The panel talks to the sidecar over the extension host's stdio pipe; it opens
   no network port.
@@ -495,9 +503,12 @@ with no turn in flight for the session is answered with an `error` frame
 vocabulary every LangStage stage streams), plus a few protocol frames:
 
 ```jsonc
-{"type": "ready", "checkpointer": {"kind": "InMemorySaver", "durable": false}}
-                                           // emitted once at startup; "checkpointer" is
-                                           // the served agent's saver (see below)
+{"type": "ready", "version": "0.5.35", "protocol": 1,
+ "capabilities": ["message", "decision", "cancel", "shutdown", "checkpointer"],
+ "checkpointer": {"kind": "InMemorySaver", "durable": false}}
+                                           // emitted once at startup: the handshake
+                                           // (see below); "checkpointer" is the served
+                                           // agent's saver
 {"type": "ack", "ref": "message"}          // command accepted ("ref": "decision" for a decision)
 {"type": "content", "content": "...", "role": "assistant", "node": "...", "message_id": "..."}
                                            // assistant text; a new message_id = a new
@@ -528,13 +539,40 @@ The sidecar wires core's `TodoExtractor` into every turn, so an agent that calls
 `--demo=tools` wires the demo's own extractor instead (`"extracted_type": "demo_fact"`).
 A client should ignore a frame type or key it doesn't know: new keys are additive.
 
+**The `ready` handshake (sidecar 0.5.35+, gh #89).** Every `ready` says which sidecar the
+client is talking to, before it sends a command, even when the agent then fails to build:
+
+| Field | Meaning |
+|---|---|
+| `version` | The sidecar's `langstage-vscode` version. |
+| `protocol` | The protocol version, `1`. It is bumped only for a breaking change (a command or frame removed or redefined). |
+| `capabilities` | What this sidecar serves, by name. New features are added here, without a `protocol` bump. |
+
+The capabilities are:
+
+| Capability | Means |
+|---|---|
+| `message` | The `message` command runs a turn. |
+| `decision` | The `decision` command answers a pending interrupt. |
+| `cancel` | The `cancel` command stops the in-flight turn cooperatively, keeping the session. |
+| `shutdown` | The `shutdown` command ends the loop; the process exits `0`. |
+| `checkpointer` | `ready` reports the served agent's `checkpointer` (absent when the agent can't be built). |
+
+`--selfcheck --json` carries the same `version`, `protocol` and `capabilities`. A sidecar
+older than 0.5.35 sends none of them. The extension (0.6.2+) refuses to start a sidecar
+whose `protocol` is newer than the one it supports, and asks you to update the extension.
+It warns, once per interpreter, when the sidecar is older than 0.5.35 (or doesn't say),
+and offers the `pip install -U langstage-vscode` command for that interpreter. It sends
+`cancel` only to a sidecar that lists it, or to one that sends no `capabilities` at all.
+
 `ready`'s `checkpointer` (sidecar 0.5.34+) describes the checkpointer the served agent
 actually runs with: `kind` is its class name (`InMemorySaver` when the graph was compiled
 without one and the sidecar attached the in-memory default), and `durable` says whether
 its threads outlive the process. An in-memory saver is not durable; any other saver
 (`SqliteSaver`, `PostgresSaver`, ...) is taken to be. The panel shows its "may not remember"
 note after a restart only when `durable` is not `true`. If the agent can't be served (the
-spec isn't a runnable graph), `ready` has no `checkpointer` and the `error` frame follows.
+spec isn't a runnable graph), `ready` has the handshake but no `checkpointer`, and the
+`error` frame follows.
 
 > A client must handle `error`: a malformed/unknown command, a `message` with no
 > `content`, an invalid `decision` (including a well-formed one sent when the session
