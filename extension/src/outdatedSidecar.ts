@@ -20,10 +20,15 @@ export interface OutdatedNotice {
   command: string;
 }
 
-/** `<python> -m pip install -U langstage-vscode`, quoting an interpreter path with spaces. */
-export function pipUpgradeCommand(python: string): string {
-  const exe = /\s/.test(python) ? `"${python}"` : python;
-  return `${exe} -m pip install -U langstage-vscode`;
+/**
+ * `<python> -m pip install -U langstage-vscode`, quoting an interpreter path with spaces.
+ * On Windows a quoted path gets PowerShell's call operator (`& "C:\...\python.exe" ...`):
+ * PowerShell is VS Code's default terminal there, and it won't run a bare quoted path.
+ */
+export function pipUpgradeCommand(python: string, platform: string = process.platform): string {
+  if (!/\s/.test(python)) return `${python} -m pip install -U langstage-vscode`;
+  const call = platform === 'win32' ? '& ' : '';
+  return `${call}"${python}" -m pip install -U langstage-vscode`;
 }
 
 /** The warning for `python`'s sidecar, given the version it reported (if any). */

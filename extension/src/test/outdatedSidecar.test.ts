@@ -15,9 +15,15 @@ test('pipUpgradeCommand runs pip through the configured interpreter, quoting a p
     '/home/me/.venv/bin/python -m pip install -U langstage-vscode',
   );
   assert.equal(
-    pipUpgradeCommand('C:\\Program Files\\Python312\\python.exe'),
-    '"C:\\Program Files\\Python312\\python.exe" -m pip install -U langstage-vscode',
+    pipUpgradeCommand('/opt/my tools/bin/python', 'linux'),
+    '"/opt/my tools/bin/python" -m pip install -U langstage-vscode',
   );
+  // Windows: PowerShell (VS Code's default terminal there) needs `&` to run a quoted path.
+  assert.equal(
+    pipUpgradeCommand('C:\\Program Files\\Python312\\python.exe', 'win32'),
+    '& "C:\\Program Files\\Python312\\python.exe" -m pip install -U langstage-vscode',
+  );
+  assert.equal(pipUpgradeCommand('python', 'win32'), 'python -m pip install -U langstage-vscode');
 });
 
 test('outdatedNotice names the interpreter, the version (or its absence) and the command', () => {
