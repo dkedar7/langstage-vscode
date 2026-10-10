@@ -298,8 +298,14 @@ def run(
     extractors: Iterable[Any] = (),
     configurable: dict[str, Any] | None = None,
     **_legacy: Any,  # accepts + ignores the removed stream_mode/agui kwargs
-) -> None:
+) -> bool:
     """Drive the command/event loop over the given streams.
+
+    Returns whether the agent was served: ``False`` when it couldn't be (the spec isn't
+    a runnable graph, or building the agent failed), in which case only ``ready`` and
+    the startup ``error`` frame were written and no command was read; ``True`` once the
+    loop has run and ended (``shutdown`` or EOF), however its turns went. ``main()``
+    turns ``False`` into exit 1 on the raw stdio path (gh #158).
 
     Since langstage-core 1.0 (ADR 0003) turns stream through the in-process AG-UI
     adapter — the only path — emitting ``event_to_dict``-shaped frames so the TS
@@ -360,7 +366,9 @@ def run(
     emit(ready)
     if graph_error is not None:
         emit({"type": "error", "error": graph_error})
-        return
+        # gh #158: tell the caller the agent was never served, so the raw stdio path
+        # exits 1 like the other startup failures, not 0 like a clean `shutdown`.
+        return False
 
     intake = _CommandIntake(stdin, enabled=enable_cancel)
 
@@ -551,6 +559,11 @@ def run(
         else:
             pending_interrupts.pop(session_id, None)
         emit({"type": "turn_end", "session_id": session_id})
+
+    # The loop served the agent and ended on `shutdown` or EOF. An `error` frame along
+    # the way (a bad command, a turn the agent failed) was answered and the loop kept
+    # serving, so it doesn't make this a failure.
+    return True
 
 
 def _runtime_versions() -> str:
@@ -1981,11 +1994,17 @@ def main(argv: list[str] | None = None) -> int:
     # holds no buffer lock when the interpreter finalizes (see _raw_lines): `shutdown`
     # exits 0 instead of aborting. A stream without a raw layer (a test double) is used
     # as-is.
-    run(
+    served = run(
         graph, _stdin_lines(sys.stdin), sys.stdout, spec=spec,
         enable_cancel=True, extractors=extractors, configurable=configurable,
     )
-    return 0
+    # gh #158: a spec that loads but can't be served (an uncompiled StateGraph, a factory
+    # function, a bare int, or an agent build that fails) is a startup failure, so exit 1,
+    # like a spec that fails to load. run() has written `ready` and the `error` frame
+    # by then. It used to return 0 here, so a supervisor keying on the exit code read
+    # the common forgot-`.compile()` mistake as success. A turn error inside a served
+    # loop doesn't count: the loop keeps serving, and ends with 0.
+    return EXIT_OK if served else EXIT_FAIL
 
 
 if __name__ == "__main__":

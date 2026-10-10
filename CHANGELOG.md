@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.36] - 2026-10-10
+
+No new langstage-core requirement. The extension is unchanged.
+
+### Fixed
+- **An agent that can't be served exits 1 over the stdio loop (gh #158).** A spec that
+  loads to something that isn't a runnable graph (an uncompiled `StateGraph`, the
+  forgot-`.compile()` mistake; a factory function; a bare value such as `42`), or an agent
+  whose build fails, gets `ready` and then the `error` frame, and the process exited `0`.
+  A spec that fails to load (a `str` value, a missing file) exits `1`, and `--selfcheck`
+  and `--message` exit `1` for all of these, so a supervisor or script keying on the exit
+  code read the most common LangGraph mistake as success. It now exits `1`, as the exit
+  code table documents. The frames are unchanged: `ready` with the handshake and no
+  `checkpointer`, then the `error` frame. `run()` returns whether it served the agent, and
+  `main()` exits `1` when it didn't. A loop that served the agent still exits `0` on
+  `shutdown` or EOF, including when a turn failed along the way: that `error` frame is
+  answered and the loop keeps serving. The extension doesn't read the exit code once
+  `ready` has arrived, so the panel and `@langstage` behave as before.
+
 ## [Extension 0.6.2] - 2026-09-30
 
 Needs no new sidecar, but expects langstage-vscode 0.5.35 or newer and warns about an

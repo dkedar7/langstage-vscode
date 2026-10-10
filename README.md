@@ -333,12 +333,16 @@ the same on every surface:
 | Code | Meaning |
 |---|---|
 | `0` | success: `--selfcheck` healthy, `--message` replied, `--repl` / the stdio loop ended cleanly, `--show-config` printed |
-| `1` | failure: no agent spec, the agent failed to load, an unusable `--workspace`, an error frame, a failed `--selfcheck` |
+| `1` | failure: no agent spec, the agent failed to load or isn't a runnable graph (an uncompiled `StateGraph`, a factory function), an unusable `--workspace`, an error frame from `--message`, a failed `--selfcheck` |
 | `2` | paused on a human-in-the-loop interrupt (`--selfcheck`, `--message`, or `--repl` ending with one unanswered) |
 | `64` | usage error: an unknown flag or bad value (`--demo=bogus`), or conflicting flags (`--demo` with `--agent`, `--repl` with `--message`) |
 
 `2` means only "paused". Usage errors exit `64` rather than argparse's default `2`, so a
 typo'd flag in a script can't read as a pause.
+
+On the stdio loop, `1` means the sidecar couldn't serve the agent at all (gh #158). An
+`error` frame for a bad command or a failed turn is answered and the loop keeps serving,
+so the loop still ends with `0` on `shutdown` or EOF.
 
 ## Usage
 
@@ -464,7 +468,8 @@ python -m langstage_vscode --demo=tools
 
 `shutdown` and closing stdin both end the loop with exit `0`. A client does not have to
 close stdin after `shutdown`; the extension keeps the pipe open until the process exits
-(gh #151).
+(gh #151). A sidecar whose agent can't be served exits `1` without reading a command (see
+*Startup failures* below).
 
 **Decision verbs.** Each entry in `decisions` needs a string `type`, and that verb must
 be one the pending `interrupt` frame lists in `allowed_decisions`. The advertised verbs
@@ -603,7 +608,10 @@ spec isn't a runnable graph), `ready` has the handshake but no `checkpointer`, a
 > **Startup failures** come *before* `ready`: with no agent spec, a spec that fails to
 > load, or a workspace root that isn't a directory (gh #121), the sidecar writes one
 > `error` frame with **no** `ready` and exits `1`. A client should show that frame's
-> `error` text; the extension does (gh #131).
+> `error` text; the extension does (gh #131). A spec that loads but **isn't a runnable
+> graph** (an uncompiled `StateGraph`, a factory function, a bare value such as `42`), or
+> an agent that fails to build, gets `ready` (the handshake, no `checkpointer`) and then
+> the `error` frame, and the sidecar exits `1` without reading a command (gh #158).
 >
 > Two more terminal shapes are *not* `complete`. An **interrupt** turn emits
 > `interrupt → complete → turn_end`: it *does* still emit `complete`, but the agent
