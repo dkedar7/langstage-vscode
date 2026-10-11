@@ -53,6 +53,11 @@ export interface PanelStatus {
    * Absent until the sidecar is ready, and from a sidecar older than 0.5.34.
    */
   checkpointer?: { kind: string | null; durable: boolean };
+  /**
+   * For `failed`: langstage-vscode isn't installed in the interpreter; the command that
+   * installs it there, for the Copy button (gh #160).
+   */
+  installCommand?: string;
 }
 
 export interface ConversationInfo {

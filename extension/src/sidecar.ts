@@ -59,6 +59,11 @@ export interface SidecarStatus {
   checkpointer?: CheckpointerInfo;
   /** For `ready`: the sidecar's handshake (every field absent from one older than 0.5.35). */
   info?: SidecarInfo;
+  /**
+   * For `failed`: the interpreter has no langstage-vscode, and this is the command that
+   * installs it there (gh #160).
+   */
+  installCommand?: string;
 }
 
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -215,6 +220,51 @@ export function sidecarCompatibility(info: SidecarInfo): SidecarCompatibility {
  */
 export function supports(info: SidecarInfo | undefined, capability: string): boolean {
   return info?.capabilities === undefined || info.capabilities.includes(capability);
+}
+
+/**
+ * `<python> -m pip install [-U] langstage-vscode`, quoting an interpreter path with spaces.
+ * On Windows a quoted path gets PowerShell's call operator (`& "C:\...\python.exe" ...`):
+ * PowerShell is VS Code's default terminal there, and it won't run a bare quoted path.
+ */
+export function pipInstallCommand(
+  python: string,
+  upgrade = false,
+  platform: string = process.platform,
+): string {
+  const pip = `-m pip install ${upgrade ? '-U ' : ''}langstage-vscode`;
+  if (!/\s/.test(python)) return `${python} ${pip}`;
+  const call = platform === 'win32' ? '& ' : '';
+  return `${call}"${python}" ${pip}`;
+}
+
+/**
+ * Whether a stderr line says the interpreter has no langstage-vscode: `python -m
+ * langstage_vscode` prints `<python>: No module named langstage_vscode` (gh #160). A
+ * missing submodule or dependency (`No module named 'langstage_core'`) doesn't count.
+ */
+export function isSidecarNotInstalled(line: string | undefined): boolean {
+  return !!line && /No module named '?langstage_vscode'?(?![\w.])/.test(line);
+}
+
+/**
+ * The sidecar isn't installed in the configured interpreter (gh #160). The extension
+ * can't run without it, and a store-only install never ran `pip install`, so say which
+ * package is missing, where, and the command that installs it.
+ */
+export class SidecarNotInstalledError extends Error {
+  readonly installCommand: string;
+
+  constructor(readonly python: string) {
+    const command = pipInstallCommand(python);
+    super(
+      `The langstage-vscode Python package, which runs your agent for this extension, is not ` +
+        `installed in ${python} (langstage.pythonPath picks the interpreter). ` +
+        `Install it with: ${command}`,
+    );
+    this.name = 'SidecarNotInstalledError';
+    this.installCommand = command;
+  }
 }
 
 /** The startup error for a sidecar that speaks a newer protocol than this extension. */
@@ -430,7 +480,12 @@ export class SidecarClient {
         if (this.readySettled) return;
         this.readySettled = true;
         if (err) {
-          this.setStatus({ state: 'failed', error: err.message, stderrTail: this.stderrTail || undefined });
+          this.setStatus({
+            state: 'failed',
+            error: err.message,
+            stderrTail: this.stderrTail || undefined,
+            ...(err instanceof SidecarNotInstalledError ? { installCommand: err.installCommand } : {}),
+          });
           reject(err);
         } else {
           const checkpointer = ready?.checkpointer;
@@ -464,6 +519,10 @@ export class SidecarClient {
           return;
         }
         const lastLine = this.stderrTail.trim().split(/\r?\n/).pop()?.trim();
+        if (isSidecarNotInstalled(lastLine)) {
+          settle(new SidecarNotInstalledError(python));
+          return;
+        }
         const detail = lastLine ? `: ${lastLine}` : code !== null ? ` (exit code ${code})` : '';
         settle(new Error(`sidecar exited before it was ready${detail}`));
       };

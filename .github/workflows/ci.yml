@@ -64,6 +64,14 @@ jobs:
       # gh #138: build the installable .vsix on every run and keep it as a workflow
       # artifact (`code --install-extension langstage-vscode-<version>.vsix`).
       - run: npm run package
+      # gh #160: the store's Details and Changelog tabs are these two VSIX assets
+      # (extension/README.md and extension/CHANGELOG.md); without them the page is blank.
+      - name: The VSIX ships the store README and CHANGELOG
+        run: |
+          vsix="langstage-vscode-$(node -p "require('./package.json').version").vsix"
+          manifest="$(unzip -p "$vsix" extension.vsixmanifest)"
+          grep -q 'Microsoft.VisualStudio.Services.Content.Details' <<<"$manifest"
+          grep -q 'Microsoft.VisualStudio.Services.Content.Changelog' <<<"$manifest"
       - uses: actions/upload-artifact@v4
         with:
           name: langstage-vscode-vsix

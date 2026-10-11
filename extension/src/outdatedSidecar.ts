@@ -11,7 +11,7 @@
  * No `vscode` import: the notification is injected (see notices.ts), so this runs under
  * `node --test`.
  */
-import { MIN_SIDECAR_VERSION, SidecarInfo, sidecarCompatibility } from './sidecar';
+import { MIN_SIDECAR_VERSION, SidecarInfo, pipInstallCommand, sidecarCompatibility } from './sidecar';
 
 /** The warning for one interpreter: its text, and the command the button copies. */
 export interface OutdatedNotice {
@@ -21,14 +21,11 @@ export interface OutdatedNotice {
 }
 
 /**
- * `<python> -m pip install -U langstage-vscode`, quoting an interpreter path with spaces.
- * On Windows a quoted path gets PowerShell's call operator (`& "C:\...\python.exe" ...`):
- * PowerShell is VS Code's default terminal there, and it won't run a bare quoted path.
+ * `<python> -m pip install -U langstage-vscode`, quoted for the platform's terminal like
+ * `pipInstallCommand` (which the not-installed error uses, gh #160).
  */
 export function pipUpgradeCommand(python: string, platform: string = process.platform): string {
-  if (!/\s/.test(python)) return `${python} -m pip install -U langstage-vscode`;
-  const call = platform === 'win32' ? '& ' : '';
-  return `${call}"${python}" -m pip install -U langstage-vscode`;
+  return pipInstallCommand(python, true, platform);
 }
 
 /** The warning for `python`'s sidecar, given the version it reported (if any). */

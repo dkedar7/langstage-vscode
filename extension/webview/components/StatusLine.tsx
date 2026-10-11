@@ -56,6 +56,16 @@ export function StatusLine({ status }: { status: PanelStatus }) {
             </div>
           )}
           <div className="ls-status-actions">
+            {status.installCommand && (
+              <button
+                type="button"
+                className="ls-btn"
+                title={status.installCommand}
+                onClick={() => post({ type: 'copy', text: status.installCommand ?? '' })}
+              >
+                Copy install command
+              </button>
+            )}
             <button type="button" className="ls-btn" onClick={() => post({ type: 'openSettings' })}>
               Open settings
             </button>

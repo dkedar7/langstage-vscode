@@ -7,9 +7,12 @@ import {
   SidecarClient,
   SidecarFrame,
   SidecarInfo,
+  SidecarNotInstalledError,
   SidecarOptions,
   compareVersions,
   isNoAgentError,
+  isSidecarNotInstalled,
+  pipInstallCommand,
   readyCheckpointer,
   readyInfo,
   sidecarArgs,
@@ -149,11 +152,64 @@ test('a sidecar that dies before any frame reports the last stderr line', async 
   const { client, procs } = makeClient();
   const ready = client.start();
   await tick();
-  procs[0].stderr.write('Traceback...\nModuleNotFoundError: No module named langstage_vscode\n');
+  procs[0].stderr.write("Traceback...\nModuleNotFoundError: No module named 'langgraph'\n");
   await tick();
   procs[0].exit(1);
-  await assert.rejects(ready, /before it was ready: ModuleNotFoundError/);
+  await assert.rejects(ready, /before it was ready: ModuleNotFoundError: No module named 'langgraph'/);
   assert.match(client.status.stderrTail ?? '', /ModuleNotFoundError/);
+  assert.equal(client.status.installCommand, undefined, 'not the sidecar itself: no install command');
+});
+
+test('gh #160: an interpreter without langstage-vscode fails with the pip install command', async () => {
+  for (const stderr of [
+    // `python -m langstage_vscode` with the package missing:
+    'C:\\Python312\\python.exe: No module named langstage_vscode\n',
+    // the line quoted in gh #160:
+    'Traceback...\nModuleNotFoundError: No module named langstage_vscode\n',
+  ]) {
+    const python = '/opt/my env/bin/python';
+    // Quoted, with PowerShell's `& ` on Windows (pipInstallCommand is pinned below).
+    const command = pipInstallCommand(python);
+    const { client, procs } = makeClient({ python });
+    const ready = client.start();
+    await tick();
+    procs[0].stderr.write(stderr);
+    await tick();
+    procs[0].exit(1);
+    await assert.rejects(ready, (err: Error) => {
+      assert.ok(err instanceof SidecarNotInstalledError);
+      assert.match(err.message, /langstage-vscode Python package.*is not installed in \/opt\/my env\/bin\/python /);
+      assert.match(err.message, /langstage\.pythonPath/);
+      assert.ok(err.message.endsWith(`Install it with: ${command}`), err.message);
+      return true;
+    });
+    assert.equal(client.status.state, 'failed');
+    assert.equal(client.status.installCommand, command);
+    assert.match(client.status.stderrTail ?? '', /No module named langstage_vscode/, 'the raw stderr is kept');
+  }
+});
+
+test('gh #160: isSidecarNotInstalled matches only the sidecar package itself', () => {
+  assert.ok(isSidecarNotInstalled('/usr/bin/python3: No module named langstage_vscode'));
+  assert.ok(isSidecarNotInstalled("ModuleNotFoundError: No module named 'langstage_vscode'"));
+  assert.ok(!isSidecarNotInstalled("ModuleNotFoundError: No module named 'langstage_core'"));
+  assert.ok(!isSidecarNotInstalled("ModuleNotFoundError: No module named 'langstage_vscode.sidecar'"));
+  assert.ok(!isSidecarNotInstalled('No module named langstage_vscode_extra'));
+  assert.ok(!isSidecarNotInstalled(undefined));
+});
+
+test('gh #160: pipInstallCommand installs through the interpreter, quoted for the terminal', () => {
+  assert.equal(pipInstallCommand('python'), 'python -m pip install langstage-vscode');
+  assert.equal(pipInstallCommand('python', true), 'python -m pip install -U langstage-vscode');
+  assert.equal(
+    pipInstallCommand('/opt/my env/bin/python', false, 'linux'),
+    '"/opt/my env/bin/python" -m pip install langstage-vscode',
+  );
+  // Windows: PowerShell (VS Code's default terminal there) needs `&` to run a quoted path.
+  assert.equal(
+    pipInstallCommand('C:\\Program Files\\Python312\\python.exe', false, 'win32'),
+    '& "C:\\Program Files\\Python312\\python.exe" -m pip install langstage-vscode',
+  );
 });
 
 test('cancel: the active turn gets a cooperative cancel; a queued one never reaches the sidecar', async () => {

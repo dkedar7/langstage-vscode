@@ -187,6 +187,24 @@ test('a startup failure shows in the status (noAgent) and the transcript; tryDem
   session.dispose();
 });
 
+test('gh #160: a missing sidecar shows its install command in the status, for the Copy button', async () => {
+  const { session, posted, procs } = setup();
+  session.handle({ v: 1, type: 'ui/ready' });
+  await tick();
+  procs[0].stderr.write('/usr/bin/python3: No module named langstage_vscode\n');
+  await tick();
+  procs[0].exit(1);
+  await tick();
+  await tick();
+  const status = [...posted].reverse().find((m) => m.type === 'status');
+  assert.ok(status && status.type === 'status');
+  assert.equal(status.status.phase, 'failed');
+  assert.equal(status.status.noAgent, false);
+  assert.match(status.status.error ?? '', /is not installed in python .*Install it with: python -m pip install langstage-vscode$/);
+  assert.equal(status.status.installCommand, 'python -m pip install langstage-vscode');
+  session.dispose();
+});
+
 test('conversation/new mints a fresh session id and keeps the old conversation', async () => {
   const { session, posted, procs } = setup();
   session.handle({ v: 1, type: 'ui/ready' });

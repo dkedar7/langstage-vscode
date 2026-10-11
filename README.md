@@ -103,7 +103,9 @@ Install it into the interpreter `langstage.pythonPath` points at (see [Configure
 The extension (0.6.2+) expects langstage-vscode **0.5.35 or newer** there. It still runs an
 older one, but warns that some features may not work and offers the upgrade command for
 that interpreter (`<python> -m pip install -U langstage-vscode`); see
-[the `ready` handshake](#sidecar-protocol).
+[the `ready` handshake](#sidecar-protocol). If that interpreter doesn't have langstage-vscode
+at all, the panel says so and offers the `<python> -m pip install langstage-vscode` command
+(extension 0.6.3+).
 
 `--demo` (the keyless echo stub) runs on this base install — since 0.5.0 the base
 deps pull the AG-UI runtime, which brings `langgraph`, so no extra is needed.
@@ -397,9 +399,11 @@ against the real sidecar running `--demo=tools`. No Copilot, no API key.*
   no network port.
 
 The panel runs its own sidecar, separate from the `@langstage` participant's, so the two
-don't share conversations. It is still a **preview**: Marketplace and Open VSX publishing
-come next ([build plan](docs/plan-standalone-panel.md), M6). The extension is disabled in
-untrusted (Restricted Mode) workspaces, because running your agent executes workspace code.
+don't share conversations. The extension is published on the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=dkedar7.langstage-vscode)
+and [Open VSX](https://open-vsx.org/extension/dkedar7/langstage-vscode) (see
+[Install](#extension)). It is disabled in untrusted (Restricted Mode) workspaces, because
+running your agent executes workspace code.
 
 ### For Copilot users: the `@langstage` chat participant
 
@@ -675,8 +679,10 @@ npm run package        # build the .vsix
 
 ## Releasing
 
-The extension version lives in `extension/package.json`. Bump it (and the CHANGELOG),
-merge to `main`, then from a clean `main` checkout run:
+The extension version lives in `extension/package.json`. Bump it, add the release to both
+`CHANGELOG.md` (as `## [Extension <version>]`) and `extension/CHANGELOG.md` (the one the
+VSIX ships, shown on the store page next to `extension/README.md`), merge to `main`, then
+from a clean `main` checkout run:
 
 ```bash
 VSCE_PAT="op://kzest/VSCE_PAT/credential" OVSX_PAT="op://kzest/OVSX_PAT/credential" op run -- bash scripts/release-extension.sh

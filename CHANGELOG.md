@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.3] - 2026-10-11
+
+Needs no new sidecar. The Python package is unchanged at 0.5.36.
+
+### Fixed
+- **The store page has a README (gh #160).** The VSIX shipped no `README.md` or
+  `CHANGELOG.md` (`extension/` had neither, and `vsce` doesn't pick up the repo-root
+  README), so the Details page on the VS Code Marketplace, Open VSX and the editor's
+  Extensions view was blank, and a store-only user never learned the extension needs
+  `pip install langstage-vscode`. There is now an `extension/README.md` written for
+  extension users: the two-part install with `langstage.pythonPath`, **Try the demo**,
+  `langstage.agentSpec`, the settings and commands, what the panel does, and links to the
+  repo and the docs, all with absolute URLs. The VSIX now carries the
+  `Microsoft.VisualStudio.Services.Content.Details` asset. `extension/CHANGELOG.md` holds
+  the extension-only history (0.3.1 to 0.6.3) for the store's Changelog tab; each
+  extension release now adds its entry there as well as here.
+- **A missing sidecar names the fix (gh #160).** When `langstage.pythonPath`'s interpreter
+  has no langstage-vscode, startup failed with
+  `sidecar exited before it was ready: ModuleNotFoundError: No module named langstage_vscode`.
+  `SidecarClient` now recognizes `No module named langstage_vscode` and fails with a
+  `SidecarNotInstalledError`. Its message says the package isn't installed in that
+  interpreter and ends with `<python> -m pip install langstage-vscode` (quoted, with
+  PowerShell's `& ` on Windows, like the outdated-sidecar warning's command). The status
+  carries the command as `installCommand`, and the panel shows a **Copy install command**
+  button next to **Open settings**. `@langstage` shows the same message. A different missing
+  module, such as one of your agent's dependencies, still shows the last stderr line.
+
+### Docs
+- The README no longer says Marketplace and Open VSX publishing "come next": the extension
+  is published on both. The release steps mention `extension/CHANGELOG.md`.
+
+### Tests
+- CI's `extension-build` job fails if the built VSIX lacks the Details or Changelog
+  asset. `src/test/storePage.test.ts` checks that the store README documents every
+  setting and palette command in `package.json`, uses only absolute links, and that
+  `extension/CHANGELOG.md` has an entry for the `package.json` version.
+
 ## [0.5.36] - 2026-10-10
 
 No new langstage-core requirement. The extension is unchanged.

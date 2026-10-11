@@ -327,6 +327,7 @@ export class PanelSession {
       demo: this.demo,
       agentSpec: this.deps.agentSpec(),
       ...(s.checkpointer ? { checkpointer: s.checkpointer } : {}),
+      ...(s.installCommand ? { installCommand: s.installCommand } : {}),
     };
     this.deps.post({ v: 1, type: 'status', status: this.status });
     // The process died on its own (not a restart we asked for): the next turn gets a
