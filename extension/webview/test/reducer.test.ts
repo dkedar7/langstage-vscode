@@ -105,6 +105,19 @@ test('tool_start / tool_end pair by id; an error result keeps the error message'
   assert.deepEqual([b.status, b.errorMessage, b.durationMs], ['error', 'exit 1', 1500]);
 });
 
+test('a resumed tool call keeps one card, completed by its result', () => {
+  // The resumed turn re-announces the call it paused in (same id) before its result.
+  const conv = fold(fresh(), [
+    { type: 'tool_start', id: 'r', name: 'issue_refund', args: { amount: 189 } },
+    { type: 'tool_start', id: 'r', name: 'issue_refund', args: { amount: 189 } },
+    { type: 'tool_end', id: 'r', name: 'issue_refund', result: 'RF-2001', status: 'success', duration_ms: 31 },
+  ]);
+  const tools = conv.items.filter((it) => it.kind === 'tool');
+  assert.equal(tools.length, 1);
+  assert.ok(tools[0].kind === 'tool');
+  assert.deepEqual([tools[0].status, tools[0].result], ['success', 'RF-2001']);
+});
+
 test('a tool_end with no tool_start still shows a card', () => {
   const conv = fold(fresh(), [{ type: 'tool_end', id: 'z', name: 'snap', result: { ok: true }, status: 'success' }]);
   const [t] = conv.items;

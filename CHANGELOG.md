@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.4] - 2026-10-11
+
+Works with any sidecar; 0.5.37 is recommended (see below).
+
+### Fixed
+- **An approved tool call doesn't spin forever.** After you approve a paused tool call,
+  the resumed turn announces that call again, with the same id, before its result.
+  The panel added a second card for it, the result completed only that one, and the
+  first card kept spinning. The panel now keeps the one card and completes it.
+
+## [0.5.37] - 2026-10-11
+
+### Changed
+- **Requires langstage-core 1.0.47.** 1.0.46: a turn resumed after an approval no
+  longer re-sends what it said before it paused, so the panel and `@langstage` don't
+  show that part twice. 1.0.47: the agent's own recursion limit is honored; every
+  agent, including deepagents ones, used to stop with `GraphRecursionError` after 25
+  steps.
+
 ## [Extension 0.6.3] - 2026-10-11
 
 Needs no new sidecar. The Python package is unchanged at 0.5.36.

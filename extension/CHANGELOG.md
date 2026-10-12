@@ -4,6 +4,15 @@ Changes to the LangStage VS Code extension. The Python sidecar (`langstage-vscod
 PyPI) is released separately; its changes, and this history in full, are in the
 [repository CHANGELOG](https://github.com/dkedar7/langstage-vscode/blob/main/CHANGELOG.md).
 
+## [0.6.4] - 2026-10-11
+
+### Fixed
+- An approved tool call no longer leaves a spinning card behind: the resumed call is
+  shown on the card it started on, and its result completes it.
+- Use it with langstage-vscode 0.5.37 or later (`pip install -U langstage-vscode`): an
+  approved turn no longer repeats what it said before the pause, and long tasks no
+  longer stop after 25 steps.
+
 ## [0.6.3] - 2026-10-11
 
 Needs no new sidecar.

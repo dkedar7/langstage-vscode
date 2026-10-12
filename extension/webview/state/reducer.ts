@@ -231,7 +231,14 @@ export function reduceFrame(conv: ConversationView, frame: Frame): ConversationV
       return push(conv, { kind: 'reasoning', key: 0, text, streaming: true });
     }
     case 'tool_start': {
-      const id = asString(frame.id) ?? `tool-${conv.nextKey}`;
+      // After an approval, the resumed turn re-announces the call it paused in, with
+      // the same id. Keep the one card so its tool_end completes it; a second card
+      // used to take the result and leave the first one spinning.
+      const known = asString(frame.id);
+      if (known !== undefined && conv.items.some((it) => it.kind === 'tool' && it.id === known)) {
+        return conv;
+      }
+      const id = known ?? `tool-${conv.nextKey}`;
       return push(conv, {
         kind: 'tool',
         key: 0,

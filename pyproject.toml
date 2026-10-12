@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langstage-vscode"
-version = "0.5.36"
+version = "0.5.37"
 description = "Python stdio sidecar bridging LangGraph agents to the LangStage VS Code chat extension"
 readme = "README.md"
 license = "MIT"
@@ -42,7 +42,9 @@ dependencies = [
     # nodes kept when a later node errors (gh #105).
     # >=1.0.37 for normalize_decision (decision verbs + the accept/ignore/response
     # aliases), which both decision drivers validate against (gh #117, #114).
-    "langstage-core[agui]>=1.0.37",
+    # >=1.0.47 so a resumed turn doesn't re-send what it said before an approval
+    # (1.0.46) and the agent's own recursion limit is honored (1.0.47).
+    "langstage-core[agui]>=1.0.47",
 ]
 
 [project.optional-dependencies]
