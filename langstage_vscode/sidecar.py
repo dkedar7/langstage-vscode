@@ -732,6 +732,11 @@ def _run_turn_agui(
             if frame.get("type") == "interrupt":
                 saw_interrupt = True
             emit(frame)
+    except BrokenPipeError:
+        # The client went away (or `--json | head` stopped reading). That isn't an
+        # agent error, and an `error` frame would go to the same dead pipe and raise
+        # again; let main() end quietly. (gh #163)
+        raise
     except Exception as exc:  # noqa: BLE001 — surfaced to the client as an event
         emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
     return saw_interrupt, False
@@ -1678,7 +1683,69 @@ def _run_once(
     return 0
 
 
+class _GuardedStdout:
+    """``sys.stdout``, with a closed pipe reported the same way on every OS (gh #163).
+
+    Writing to a pipe whose reader has gone raises ``BrokenPipeError`` on POSIX, but
+    ``OSError: [Errno 22] Invalid argument`` on Windows. Only stdout writes are
+    translated, so an agent's own ``OSError`` is still an agent error.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    @staticmethod
+    def _closed(exc: OSError) -> bool:
+        import errno
+        import sys
+
+        return isinstance(exc, BrokenPipeError) or (sys.platform == "win32" and exc.errno == errno.EINVAL)
+
+    def write(self, text: str) -> int:
+        try:
+            return self._stream.write(text)
+        except OSError as exc:
+            if self._closed(exc):
+                raise BrokenPipeError(32, "stdout was closed") from exc
+            raise
+
+    def flush(self) -> None:
+        try:
+            self._stream.flush()
+        except OSError as exc:
+            if self._closed(exc):
+                raise BrokenPipeError(32, "stdout was closed") from exc
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Entry point for ``langstage-vscode-sidecar`` and ``python -m langstage_vscode``."""
+    import sys
+
+    original = sys.stdout
+    if not isinstance(original, _GuardedStdout):
+        sys.stdout = _GuardedStdout(original)
+    try:
+        return _main(argv)
+    except BrokenPipeError:
+        # A reader that stops early (`--message --json | head`) or a client that goes
+        # away closes stdout mid-turn. That's normal use, not a crash: exit quietly,
+        # as langstage-cli does (langstage-cli#74). Point stdout at devnull so the
+        # interpreter's shutdown flush doesn't raise a second BrokenPipeError. (gh #163)
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, original.fileno())
+        except (OSError, ValueError):  # no real fd (e.g. under test capture)
+            pass
+        return 0
+    finally:
+        sys.stdout = original
+
+
+def _main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
 

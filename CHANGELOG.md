@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.38] - 2026-10-12
+
+### Fixed
+- **A closed stdout ends the sidecar quietly** (gh #163). Piping the `--json` frame
+  stream into a reader that stops early (`--message --json | head -4`), or a client
+  that goes away, closed stdout mid-turn. The turn's error handler took the failed
+  write for an agent error and wrote an `error` frame to the same dead pipe, so the
+  sidecar died with a double `BrokenPipeError` traceback and exit 1. It now exits 0
+  with nothing on stderr, as langstage-cli does. On Windows a closed pipe shows up as
+  `OSError: [Errno 22]` rather than `BrokenPipeError`; that's handled too, without
+  hiding an agent's own `OSError`.
+
 ## [Extension 0.6.4] - 2026-10-11
 
 Works with any sidecar; 0.5.37 is recommended (see below).
