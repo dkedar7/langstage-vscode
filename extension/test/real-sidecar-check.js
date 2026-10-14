@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { PanelSession } = require('../dist/panel/panelSession');
-const { SidecarClient, sidecarArgs, sidecarEnv } = require('../dist/sidecar');
+const { SidecarClient, sidecarLaunch } = require('../dist/sidecar');
 
 const envPython = process.env.LANGSTAGE_PYTHON || 'python';
 // A path (not a bare command) is resolved here: the sidecar is spawned with cwd = workspace.
@@ -32,9 +32,7 @@ const session = new PanelSession({
   createClient: ({ demo }) =>
     new SidecarClient({
       python,
-      args: sidecarArgs(workspace, '', demo ? 'tools' : undefined),
-      cwd: workspace,
-      env: sidecarEnv(workspace),
+      ...sidecarLaunch(workspace, '', demo ? 'tools' : undefined),
     }),
   agentSpec: () => '',
   openExternal: () => undefined,

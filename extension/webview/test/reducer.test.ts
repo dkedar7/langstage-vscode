@@ -187,6 +187,84 @@ test('cancelled settles the stream and leaves a notice', () => {
   assert.ok(conv.items[0].kind === 'assistant' && !conv.items[0].streaming);
 });
 
+const toolStates = (c: ConversationView) =>
+  c.items.flatMap((i) => (i.kind === 'tool' ? [[i.name, i.status, i.errorMessage ?? null]] : []));
+
+test('gh #166: Stop during a slow tool leaves no card running', () => {
+  // Exactly what the sidecar emits: tool_start → cancelled → turn_end, no tool_end.
+  const conv = fold(fresh(), [
+    { type: 'ack', ref: 'message' },
+    { type: 'tool_start', id: 's1', name: 'slow', args: { x: 1 }, node: 'm' },
+    { type: 'cancelled', session_id: 's' },
+    { type: 'turn_end', session_id: 's' },
+  ]);
+  assert.deepEqual(toolStates(conv), [['slow', 'cancelled', null]]);
+  assert.deepEqual(conv.items.map((i) => i.kind), ['tool', 'notice']);
+});
+
+test('gh #166: a tool that raises fails with the turn; its finished sibling keeps its result', () => {
+  const conv = fold(fresh(), [
+    { type: 'tool_start', id: 'c1', name: 'add', args: { a: 1, b: 2 } },
+    { type: 'tool_start', id: 'c2', name: 'boom', args: {} },
+    { type: 'tool_end', id: 'c1', name: 'add', result: '3', status: 'success' },
+    { type: 'error', error: 'ValueError: kaboom' },
+    { type: 'turn_end', session_id: 'once' },
+  ]);
+  assert.deepEqual(toolStates(conv), [
+    ['add', 'success', null],
+    ['boom', 'error', 'ValueError: kaboom'],
+  ]);
+});
+
+test('gh #166: a turn that just ends closes an open call; turn/ended and a restore do too', () => {
+  const frames: Frame[] = [{ type: 'tool_start', id: 'o', name: 'orphan', args: {} }];
+  assert.deepEqual(toolStates(fold(fresh(), [...frames, { type: 'turn_end' }])), [['orphan', 'cancelled', null]]);
+
+  let s = restored();
+  s = reduce(s, { v: 1, type: 'turn/started', conversationId: C });
+  s = reduce(s, { v: 1, type: 'frame', conversationId: C, frame: frames[0] });
+  assert.deepEqual(toolStates(s.conversations[C]), [['orphan', 'running', null]], 'running while the turn is');
+  s = reduce(s, { v: 1, type: 'turn/ended', conversationId: C });
+  assert.deepEqual(toolStates(s.conversations[C]), [['orphan', 'cancelled', null]]);
+
+  // A transcript saved by an older build (no turn_end logged) restores settled...
+  const log: LogEntry[] = frames.map((frame) => ({ kind: 'frame', frame }));
+  assert.deepEqual(toolStates(restored(log).conversations[C]), [['orphan', 'cancelled', null]]);
+  // ...unless that turn is still in flight.
+  assert.deepEqual(toolStates(restored(log, { [C]: 'running' }).conversations[C]), [['orphan', 'running', null]]);
+  // And the Stop transcript replays to the same cards it showed live.
+  const stop: Frame[] = [...frames, { type: 'cancelled' }, { type: 'turn_end' }];
+  const replay = restored(stop.map((frame) => ({ kind: 'frame', frame })));
+  assert.deepEqual(toolStates(replay.conversations[C]), [['orphan', 'cancelled', null]]);
+});
+
+test('gh #166: the call a turn paused in stays open for the resumed turn to complete', () => {
+  let conv = fold(fresh(), [
+    { type: 'tool_start', id: 'r', name: 'issue_refund', args: { amount: 189 } },
+    { type: 'interrupt', allowed_decisions: ['approve', 'reject'] },
+    { type: 'complete', outcome: 'interrupted' },
+    { type: 'turn_end' },
+  ]);
+  assert.deepEqual(toolStates(conv), [['issue_refund', 'running', null]]);
+  conv = fold(conv, [
+    { type: 'ack', ref: 'decision' },
+    { type: 'tool_start', id: 'r', name: 'issue_refund', args: { amount: 189 } },
+    { type: 'tool_end', id: 'r', name: 'issue_refund', result: 'RF-2001', status: 'success' },
+    { type: 'turn_end' },
+  ]);
+  assert.deepEqual(toolStates(conv), [['issue_refund', 'success', null]]);
+  assert.equal(conv.items.filter((i) => i.kind === 'tool').length, 1, 'still one card (0.6.4 dedupe)');
+
+  // The agent restarted before the answer: the call never runs.
+  const lost = fold(fresh(), [
+    { type: 'tool_start', id: 'r', name: 'issue_refund', args: {} },
+    { type: 'interrupt', allowed_decisions: ['approve'] },
+    { type: 'turn_end' },
+    { type: 'memory_reset', source: 'panel' },
+  ]);
+  assert.deepEqual(toolStates(lost), [['issue_refund', 'cancelled', null]]);
+});
+
 test('unknown frame types and keys are ignored', () => {
   const before = fresh();
   assert.equal(reduceFrame(before, { type: 'usage', input_tokens: 3 }), before);

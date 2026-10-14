@@ -4,6 +4,18 @@ Changes to the LangStage VS Code extension. The Python sidecar (`langstage-vscod
 PyPI) is released separately; its changes, and this history in full, are in the
 [repository CHANGELOG](https://github.com/dkedar7/langstage-vscode/blob/main/CHANGELOG.md).
 
+## [0.6.5] - 2026-10-14
+
+Needs no new sidecar.
+
+### Fixed
+- A tool card no longer spins forever when its turn ends first. After Stop it shows
+  "Stopped before it finished."; after a failed turn it fails with the turn's error.
+  Reloading the window shows the same.
+- A `[workspace] root` in `langstage.toml`, or a `LANGSTAGE_WORKSPACE_ROOT` in VS Code's
+  environment, is now honored. The workspace folder is the default, as with
+  `--selfcheck` and `--message`.
+
 ## [0.6.4] - 2026-10-11
 
 ### Fixed

@@ -109,13 +109,18 @@ export interface Turn {
   done: Promise<TurnResult>;
 }
 
-/** The sidecar command line (after the interpreter) for a workspace and agent. */
-export function sidecarArgs(
-  workspace: string,
-  agentSpec: string,
-  demo?: 'echo' | 'tools',
-): string[] {
-  const args = ['-m', 'langstage_vscode', '--workspace', workspace];
+/**
+ * The sidecar command line (after the interpreter) for an agent.
+ *
+ * gh #165: no `--workspace`. The sidecar runs with cwd = the workspace folder (see
+ * `sidecarLaunch`), which makes the folder the *default* workspace root and the start
+ * of the `langstage.toml` walk-up. A `[workspace] root` there, or a
+ * `LANGSTAGE_WORKSPACE_ROOT` the user exported, then wins, through the documented
+ * chain (defaults < langstage.toml < LANGSTAGE_* env < CLI flags) exactly as in the
+ * `--selfcheck` / `--message` preflight. A `--workspace` flag outranked them both.
+ */
+export function sidecarArgs(agentSpec: string, demo?: 'echo' | 'tools'): string[] {
+  const args = ['-m', 'langstage_vscode'];
   if (demo) {
     args.push(demo === 'echo' ? '--demo' : `--demo=${demo}`);
   } else if (agentSpec) {
@@ -124,14 +129,18 @@ export function sidecarArgs(
   return args;
 }
 
-/** The environment the sidecar runs with: the workspace root under both names. */
-export function sidecarEnv(workspace: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return {
-    ...base,
-    LANGSTAGE_WORKSPACE_ROOT: workspace,
-    // Older sidecar versions read the legacy name.
-    DEEPAGENT_WORKSPACE_ROOT: workspace,
-  };
+/**
+ * How to launch the sidecar for a workspace folder: in that folder, with the
+ * environment as it is. gh #165: the folder is the default root, not an override, so
+ * `LANGSTAGE_WORKSPACE_ROOT` is left to the user (the sidecar publishes the root it
+ * resolved to the agent itself, under both names).
+ */
+export function sidecarLaunch(
+  workspace: string,
+  agentSpec: string,
+  demo?: 'echo' | 'tools',
+): { args: string[]; cwd: string } {
+  return { args: sidecarArgs(agentSpec, demo), cwd: workspace };
 }
 
 /** The startup error the sidecar reports when no agent is configured (gh #121/#131). */

@@ -89,6 +89,7 @@ export function ToolCard({ tool }: { tool: ToolItem }) {
             </section>
           )}
           {tool.status === 'running' && <div className="ls-muted">Running…</div>}
+          {tool.status === 'cancelled' && <div className="ls-muted">Stopped before it finished.</div>}
         </div>
       )}
     </div>

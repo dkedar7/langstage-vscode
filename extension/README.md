@@ -62,6 +62,15 @@ Leave `langstage.agentSpec` empty to use `LANGSTAGE_AGENT_SPEC` or the project's
 `langstage.toml` (`[agent] spec = "my_agent.py:graph"`), the same config every LangStage
 stage reads.
 
+### Workspace root
+
+The agent runs in your workspace folder (the first one, in a multi-root workspace) unless
+you've set a root yourself: a `[workspace] root` in `langstage.toml` (a relative path is
+taken from that file's folder) or a `LANGSTAGE_WORKSPACE_ROOT` in the environment VS Code
+was started with. Those win in the same order as everywhere else (`langstage.toml`, then
+the environment), so `langstage-vscode-sidecar --show-config`, run from the workspace
+folder, shows the root the panel and `@langstage` use.
+
 ## Settings
 
 | Setting | What it does | Default |

@@ -12,7 +12,7 @@ import {
   pendingFromMetadata,
   summarizeActions,
 } from './hitl';
-import { SidecarClient, SidecarFrame, sidecarArgs, sidecarEnv } from './sidecar';
+import { SidecarClient, SidecarFrame, sidecarLaunch } from './sidecar';
 
 /**
  * The `@langstage` chat participant, for Copilot users (ADR 0001). Registered only
@@ -177,9 +177,7 @@ function getOrCreateClient(python: string, agentSpec: string, workspace: string)
   disposeParticipantSidecar(); // config changed or process is gone
   const sc = new SidecarClient({
     python,
-    args: sidecarArgs(workspace, agentSpec),
-    cwd: workspace,
-    env: sidecarEnv(workspace),
+    ...sidecarLaunch(workspace, agentSpec),
     // gh #89: warn (once per interpreter) about an outdated sidecar.
     onReady: (info) => outdatedSidecarWarnings.check(python, info),
   });

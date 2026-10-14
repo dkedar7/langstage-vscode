@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.5] - 2026-10-14
+
+Works with any sidecar; needs no new one.
+
+### Fixed
+- **A tool card stops spinning when its turn ends** (gh #166). A turn that ended without
+  the call's `tool_end` (Stop during a slow tool: `tool_start → cancelled → turn_end`; a
+  tool that raised: `tool_start → error → turn_end`) left the card on "Running…" for
+  good, and a reload replayed it. When the turn ends, a call still open is now closed:
+  after a failed turn it fails with the turn's error, otherwise it shows a new
+  "did not finish" mark and "Stopped before it finished.". A restored transcript settles
+  the same way. The call a turn paused in for an approval stays open, since the resumed
+  turn completes it, unless the agent restarts before it's answered.
+- **The editor honors `[workspace] root` and `LANGSTAGE_WORKSPACE_ROOT`** (gh #165). The
+  extension launched the sidecar with `--workspace <folder>` and overwrote
+  `LANGSTAGE_WORKSPACE_ROOT`, so a root set in `langstage.toml` or the environment was
+  dropped without notice, and the editor ran the agent somewhere other than the
+  `--selfcheck` / `--message` preflight did. The sidecar now starts in the workspace
+  folder with no flag and the environment as it is: the folder is the default root, and
+  `langstage.toml` (found from the folder up) and `LANGSTAGE_WORKSPACE_ROOT` win over it,
+  as documented. With neither set, nothing changes.
+
 ## [0.5.38] - 2026-10-12
 
 ### Fixed

@@ -22,13 +22,19 @@ export interface TodoItem {
   status: 'pending' | 'in_progress' | 'completed';
 }
 
+export type ToolStatus = 'running' | 'success' | 'error' | 'cancelled';
+
 export interface ToolItem {
   kind: 'tool';
   key: number;
   id: string;
   name: string;
   args: unknown;
-  status: 'running' | 'success' | 'error';
+  /**
+   * `cancelled`: its turn ended (Stop, or the turn ended some other way) before a
+   * `tool_end` came; `error` also covers a turn that failed while it ran (gh #166).
+   */
+  status: ToolStatus;
   result?: string;
   errorMessage?: string | null;
   durationMs?: number | null;
@@ -111,7 +117,7 @@ export function reduce(state: PanelState, msg: HostToWebview): PanelState {
         let conv = emptyConversation(info);
         for (const entry of msg.transcripts[info.id] ?? []) conv = reduceLogEntry(conv, entry);
         const turn = msg.turns[info.id];
-        conv = turn ? { ...conv, turn } : settle(conv);
+        conv = turn ? { ...conv, turn } : endTurn(conv);
         conversations[info.id] = conv;
       }
       // Newest first, for the conversation list.
@@ -144,7 +150,7 @@ export function reduce(state: PanelState, msg: HostToWebview): PanelState {
     case 'turn/started':
       return update(state, msg.conversationId, (c) => ({ ...c, turn: 'running' }));
     case 'turn/ended':
-      return update(state, msg.conversationId, (c) => unsend(settle({ ...c, turn: 'idle' })));
+      return update(state, msg.conversationId, (c) => unsend(endTurn({ ...c, turn: 'idle' })));
     default:
       return state;
   }
@@ -197,6 +203,30 @@ function settle(conv: ConversationView): ConversationView {
       (it.kind === 'assistant' || it.kind === 'reasoning') && it.streaming ? { ...it, streaming: false } : it,
     ),
   };
+}
+
+/**
+ * gh #166: a turn is over, so no tool card may still claim to be running. A call that
+ * never got its `tool_end` (Stop during a slow tool, a tool that raised, a sidecar
+ * that died) takes `status` instead. Except while the conversation is paused on an
+ * interrupt: the call it paused in is still waiting, and the resumed turn re-announces
+ * it (same id) and completes it.
+ */
+function closeTools(conv: ConversationView, status: 'cancelled' | 'error', error?: string): ConversationView {
+  if (conv.pending || !conv.items.some((it) => it.kind === 'tool' && it.status === 'running')) return conv;
+  return {
+    ...conv,
+    items: conv.items.map((it) =>
+      it.kind === 'tool' && it.status === 'running'
+        ? { ...it, status, errorMessage: it.errorMessage ?? (status === 'error' ? error ?? null : null) }
+        : it,
+    ),
+  };
+}
+
+/** The turn ended: close the streaming blocks and any tool call left open. */
+function endTurn(conv: ConversationView): ConversationView {
+  return closeTools(settle(conv), 'cancelled');
 }
 
 const asString = (x: unknown): string | undefined => (typeof x === 'string' ? x : undefined);
@@ -311,7 +341,8 @@ export function reduceFrame(conv: ConversationView, frame: Frame): ConversationV
       const items = p
         ? conv.items.map((it) => (it.kind === 'interrupt' && it.key === p.key ? { ...it, expired: true } : it))
         : conv.items;
-      return push({ ...conv, items, pending: undefined }, { kind: 'memoryReset', key: 0 });
+      // A call that was waiting on it will never finish either.
+      return push(closeTools({ ...conv, items, pending: undefined }, 'cancelled'), { kind: 'memoryReset', key: 0 });
     }
     case 'error':
       // The sidecar refused what answered the pending interrupt (gh #117 / #134):
@@ -323,7 +354,8 @@ export function reduceFrame(conv: ConversationView, frame: Frame): ConversationV
           pending: { ...conv.pending, sent: undefined, error: asString(frame.error) ?? 'refused' },
         };
       }
-      return push(unsend(conv), {
+      // The turn failed: a call still open failed with it.
+      return push(closeTools(unsend(conv), 'error', asString(frame.error)), {
         kind: 'error',
         key: 0,
         error: asString(frame.error) ?? 'unknown error',
@@ -331,11 +363,11 @@ export function reduceFrame(conv: ConversationView, frame: Frame): ConversationV
         host: frame.source === 'panel',
       });
     case 'cancelled':
-      return push(unsend(settle(conv)), { kind: 'notice', key: 0, text: 'Stopped.' });
+      return push(unsend(closeTools(settle(conv), 'cancelled')), { kind: 'notice', key: 0, text: 'Stopped.' });
     case 'complete':
       return settle(conv);
     case 'turn_end':
-      return unsend(settle(conv));
+      return unsend(endTurn(conv));
     default:
       // ack, ready, usage and anything newer: nothing to render.
       return conv;

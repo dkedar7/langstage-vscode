@@ -16,6 +16,7 @@ import {
   readyCheckpointer,
   readyInfo,
   sidecarArgs,
+  sidecarLaunch,
   sidecarCompatibility,
   supports,
 } from '../sidecar';
@@ -34,10 +35,17 @@ function readyFrame(extra: Record<string, unknown> = {}): SidecarFrame {
 }
 
 test('sidecarArgs: agent spec, demo, and demo wins over a spec', () => {
-  assert.deepEqual(sidecarArgs('/w', ''), ['-m', 'langstage_vscode', '--workspace', '/w']);
-  assert.deepEqual(sidecarArgs('/w', 'a.py:g'), ['-m', 'langstage_vscode', '--workspace', '/w', '--agent', 'a.py:g']);
-  assert.deepEqual(sidecarArgs('/w', 'a.py:g', 'tools'), ['-m', 'langstage_vscode', '--workspace', '/w', '--demo=tools']);
-  assert.deepEqual(sidecarArgs('/w', '', 'echo'), ['-m', 'langstage_vscode', '--workspace', '/w', '--demo']);
+  assert.deepEqual(sidecarArgs(''), ['-m', 'langstage_vscode']);
+  assert.deepEqual(sidecarArgs('a.py:g'), ['-m', 'langstage_vscode', '--agent', 'a.py:g']);
+  assert.deepEqual(sidecarArgs('a.py:g', 'tools'), ['-m', 'langstage_vscode', '--demo=tools']);
+  assert.deepEqual(sidecarArgs('', 'echo'), ['-m', 'langstage_vscode', '--demo']);
+});
+
+test('gh #165: the workspace folder is the default root (the cwd), never an override', () => {
+  const launch = sidecarLaunch('/w', 'a.py:g') as { args: string[]; cwd: string; env?: unknown };
+  assert.equal(launch.cwd, '/w', 'the sidecar starts in the folder: the default root and the toml walk-up start');
+  assert.ok(!launch.args.includes('--workspace'), 'a --workspace flag would outrank langstage.toml and the env');
+  assert.equal(launch.env, undefined, "the user's LANGSTAGE_WORKSPACE_ROOT is inherited, not overwritten");
 });
 
 test('isNoAgentError recognizes the sidecar no-spec startup error', () => {

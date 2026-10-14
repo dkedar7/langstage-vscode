@@ -26,7 +26,7 @@ const { PanelSession } = require('../../dist/panel/panelSession');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { ConversationStore } = require('../../dist/panel/conversationStore');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { SidecarClient, sidecarArgs, sidecarEnv } = require('../../dist/sidecar');
+const { SidecarClient, sidecarLaunch } = require('../../dist/sidecar');
 
 export const HARNESS = pathToFileURL(path.join(__dirname, 'index.html')).href;
 export const FIXTURE_AGENT = `${path.resolve(__dirname, '..', 'fixtures', 'hitl_agent.py')}:graph`;
@@ -126,6 +126,9 @@ export class Relay {
     const env = { ...process.env };
     delete env.LANGSTAGE_AGENT_SPEC;
     delete env.DEEPAGENT_AGENT_SPEC;
+    // ...and no root: the sidecar runs in the test's workspace (gh #165).
+    delete env.LANGSTAGE_WORKSPACE_ROOT;
+    delete env.DEEPAGENT_WORKSPACE_ROOT;
     const spec = agent === 'demo' || agent === 'none' ? '' : agent;
     const session = new PanelSession({
       post: (msg: HostMsg) => {
@@ -140,9 +143,8 @@ export class Relay {
       createClient: ({ demo }: { demo: boolean }) =>
         new SidecarClient({
           python,
-          args: sidecarArgs(workspace, spec, demo ? 'tools' : undefined),
-          cwd: workspace,
-          env: sidecarEnv(workspace, env),
+          ...sidecarLaunch(workspace, spec, demo ? 'tools' : undefined),
+          env,
         }),
       agentSpec: () => spec,
       openExternal: () => undefined,
