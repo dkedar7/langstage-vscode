@@ -4,6 +4,15 @@ Changes to the LangStage VS Code extension. The Python sidecar (`langstage-vscod
 PyPI) is released separately; its changes, and this history in full, are in the
 [repository CHANGELOG](https://github.com/dkedar7/langstage-vscode/blob/main/CHANGELOG.md).
 
+## [0.6.6] - 2026-10-19
+
+Needs no new sidecar.
+
+### Fixed
+- The old `deepagent.pythonPath` setting works again, as documented. The default for
+  `langstage.pythonPath` (`python`) always won over it, so the sidecar ran under the
+  `python` on PATH instead of the interpreter you'd set.
+
 ## [0.6.5] - 2026-10-14
 
 Needs no new sidecar.
