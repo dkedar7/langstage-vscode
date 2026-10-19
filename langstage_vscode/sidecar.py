@@ -846,6 +846,15 @@ def _agent_key_typos(cfg: Any) -> list[str]:
     ]
 
 
+def _malformed_tomls(cfg: Any) -> list[dict]:
+    """``langstage.toml`` files found on the search path but dropped because they don't
+    parse: ``[{"path", "error"}]`` (gh #169)."""
+    try:
+        return list(cfg.malformed_toml())
+    except Exception:  # noqa: BLE001 - a diagnostic must never break the preflight
+        return []
+
+
 # `--selfcheck` exit code for an agent whose preflight turn paused on an interrupt
 # (gh #130) — the same "paused awaiting a decision" code `--message` / `--repl` use.
 # The LangStage family exit codes (core ADR 0007,
@@ -886,7 +895,8 @@ def _selfcheck(
     ``demo_fallback`` means no agent is configured and ``spec`` is the demo stub, so a
     pass only proves the runtime works. The verdict says so (``--json`` adds
     ``"demo_fallback": true``), and if a ``langstage.toml`` key that looks like a typo'd
-    agent spec was ignored, it FAILs rather than validating the stub (gh #124).
+    agent spec was ignored, or a ``langstage.toml`` was dropped because it doesn't parse,
+    it FAILs rather than validating the stub (gh #124, gh #169).
 
     Answers the question the VS Code extension needs before wiring up the chat
     participant: does this interpreter have a working sidecar, and does the
@@ -948,6 +958,17 @@ def _selfcheck(
                 "no agent spec resolved, and langstage.toml has unknown keys that look like "
                 f"one: {', '.join(typos)} (expected `[agent]` + `spec = ...`). Not validating "
                 "the demo stub in its place; pass --demo to check the runtime alone.",
+            )
+        # gh #169: the residual -- the toml didn't parse at all, so its whole [agent]
+        # table was dropped. Validating the stub would be just as false a green.
+        malformed = _malformed_tomls(cfg)
+        if malformed:
+            files = "; ".join(f"{m['path']} ({m['error']})" for m in malformed)
+            return verdict(
+                False,
+                f"no agent spec resolved, and a config file was ignored because it doesn't "
+                f"parse: {files}. Not validating the demo stub in its place; fix the file, "
+                "or pass --demo to check the runtime alone.",
             )
 
     # Publish the resolved workspace to the agent's env (canonical + legacy names).

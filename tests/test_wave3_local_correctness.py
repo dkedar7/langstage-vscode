@@ -329,6 +329,25 @@ def test_selfcheck_fails_on_typod_spec_key_instead_of_validating_the_stub(
         assert key in verdict["message"] and "demo stub" in verdict["message"]
 
 
+def test_selfcheck_fails_when_the_toml_does_not_parse(monkeypatch, tmp_path, capsys):
+    """gh #169: a malformed langstage.toml is dropped whole; that must not read as a
+    green "validated the demo stub"."""
+    _isolate(monkeypatch, tmp_path)
+    proj = _agent_project(tmp_path, '[agent]\nspec = "my_agent.py:graph"\nmodel = \n')
+    monkeypatch.chdir(proj)
+    rc = main(["--selfcheck", "--json"])
+    verdict = json.loads(capsys.readouterr().out.strip())
+    assert rc == 1, verdict
+    assert verdict["ok"] is False and verdict["demo_fallback"] is True
+    assert "langstage.toml" in verdict["message"] and "--demo" in verdict["message"]
+    # Text mode says the same on stderr.
+    assert main(["--selfcheck"]) == 1
+    assert "doesn't parse" in capsys.readouterr().err
+    # --demo still checks the runtime alone.
+    assert main(["--selfcheck", "--demo", "--json"]) == 0
+    capsys.readouterr()
+
+
 def test_selfcheck_with_no_config_says_it_only_validated_the_stub(monkeypatch, tmp_path, capsys):
     """The documented no-agent fallback stays OK, but says what it did validate."""
     _isolate(monkeypatch, tmp_path)

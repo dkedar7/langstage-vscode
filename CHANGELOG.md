@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.6] - 2026-10-19
+
+Works with any sidecar; needs no new one.
+
+### Fixed
+- **The legacy `deepagent.pythonPath` setting is read again** (gh #168). The README
+  promises the old `deepagent.*` names still work, but `langstage.pythonPath`'s
+  contributed default (`python`) always won, so a project that kept the old setting ran
+  the sidecar under whatever `python` was on PATH. Now only a `langstage.*` value someone
+  set (user, workspace or folder) beats the legacy one.
+
+## [0.5.39] - 2026-10-19
+
+### Fixed
+- **`--selfcheck` fails when `langstage.toml` doesn't parse** (gh #169). A malformed
+  file is dropped whole, so no agent resolved and `--selfcheck` validated the demo stub
+  and reported `OK` / `"ok": true`, exit 0. Like an ignored typo'd agent key (gh #124),
+  it is now a FAIL (exit 1) that names the file and the parse error. `--selfcheck --demo`
+  still checks the runtime alone.
+
 ## [Extension 0.6.5] - 2026-10-14
 
 Works with any sidecar; needs no new one.

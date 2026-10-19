@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { withLegacyFallback } from './launchSettings';
 
 /** What both surfaces need to launch a sidecar. */
 export interface LaunchConfig {
@@ -11,8 +12,10 @@ export interface LaunchConfig {
 export function readLaunchConfig(): LaunchConfig {
   const config = vscode.workspace.getConfiguration('langstage');
   const legacy = vscode.workspace.getConfiguration('deepagent');
-  const agentSpec = config.get<string>('agentSpec') || legacy.get<string>('agentSpec') || '';
-  const python = config.get<string>('pythonPath') || legacy.get<string>('pythonPath') || 'python';
+  // Only values someone set: get() returns the contributed default ("python"), which
+  // would always beat a legacy deepagent.pythonPath (gh #168).
+  const agentSpec = withLegacyFallback<string>(config.inspect('agentSpec'), legacy.inspect('agentSpec'), '');
+  const python = withLegacyFallback<string>(config.inspect('pythonPath'), legacy.inspect('pythonPath'), 'python');
   const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   return { python, agentSpec, workspace };
 }
