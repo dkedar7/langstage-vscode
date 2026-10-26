@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.40] - 2026-10-26
+
+### Fixed
+- **A typo'd agent key in `langstage.toml` is named when the agent starts** (gh #171).
+  `[agent] specc = ...`, a top-level `spec` or an `[agents]` table used to give the stdio
+  loop the extension starts, `--message` and `--repl` only the generic "no agent spec",
+  so the panel suggested the demo with no hint that a key was ignored. The error now
+  names the key, or the `langstage.toml` that doesn't parse and its parse error, the way
+  `--selfcheck` already did. The text still starts with "no agent spec", so any
+  extension version shows it under "No agent configured".
+
 ## [Extension 0.6.6] - 2026-10-19
 
 Works with any sidecar; needs no new one.

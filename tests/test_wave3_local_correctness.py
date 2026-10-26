@@ -348,6 +348,44 @@ def test_selfcheck_fails_when_the_toml_does_not_parse(monkeypatch, tmp_path, cap
     capsys.readouterr()
 
 
+def test_run_path_names_the_ignored_spec_key(monkeypatch, tmp_path, capsys):
+    """gh #171: the stdio loop the extension starts, --message and --repl give the
+    same diagnosis as --selfcheck, keeping the `no agent spec` prefix the panel matches."""
+    for toml, key in (('[agent]\nspecc = "my_agent.py:graph"\n', "agent.specc"),
+                      ('spec = "my_agent.py:graph"\n', "spec")):
+        _isolate(monkeypatch, tmp_path)
+        proj = _agent_project(tmp_path, toml, name=key)
+        monkeypatch.chdir(proj)
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"type":"shutdown"}\n'))
+        assert main([]) == 1
+        frame = json.loads(capsys.readouterr().out.strip())
+        assert frame["type"] == "error"
+        assert frame["error"].startswith("no agent spec")
+        assert key in frame["error"] and "[agent]" in frame["error"]
+        for flags in (["--message", "hi"], ["--repl"]):
+            assert main(flags) == 1
+            err = capsys.readouterr().err
+            assert err.startswith("error: no agent spec") and key in err
+
+
+def test_run_path_names_a_toml_that_does_not_parse(monkeypatch, tmp_path, capsys):
+    _isolate(monkeypatch, tmp_path)
+    proj = _agent_project(tmp_path, '[agent]\nspec = "my_agent.py:graph"\nmodel = \n')
+    monkeypatch.chdir(proj)
+    assert main(["--message", "hi"]) == 1
+    # The loader's own `note: ignoring malformed config` line comes first.
+    err = capsys.readouterr().err.splitlines()[-1]
+    assert err.startswith("error: no agent spec") and "doesn't parse" in err
+    assert "langstage.toml" in err
+
+
+def test_run_path_with_no_config_keeps_the_generic_hint(monkeypatch, tmp_path, capsys):
+    _isolate(monkeypatch, tmp_path)
+    assert main(["--message", "hi"]) == 1
+    err = capsys.readouterr().err
+    assert "set [agent].spec in langstage.toml" in err and "unknown keys" not in err
+
+
 def test_selfcheck_with_no_config_says_it_only_validated_the_stub(monkeypatch, tmp_path, capsys):
     """The documented no-agent fallback stays OK, but says what it did validate."""
     _isolate(monkeypatch, tmp_path)
