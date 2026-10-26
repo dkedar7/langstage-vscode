@@ -2015,9 +2015,27 @@ def _main(argv: list[str] | None = None) -> int:
         )
 
     if not spec:
+        # gh #171: the run path used to give the same bare "no agent spec" text as the
+        # stdio loop, so a typo'd key (`[agent] specc`) was invisible on the one path
+        # the extension drives. Reuse the --selfcheck diagnostics so the error names the
+        # ignored key or the malformed file — the message still starts with "no agent
+        # spec" so the extension's isNoAgentError() keeps matching it.
+        detail = ""
+        typos = _agent_key_typos(cfg)
+        if typos:
+            detail = (
+                f"; langstage.toml has unknown keys that look like one: "
+                f"{', '.join(typos)} (expected `[agent]` + `spec = ...`)"
+            )
+        malformed = _malformed_tomls(cfg)
+        if malformed:
+            files = "; ".join(f"{m['path']} ({m['error']})" for m in malformed)
+            detail += (
+                f"; a config file was ignored because it doesn't parse: {files}"
+            )
         return fail(
             "no agent spec (pass --agent or --demo, set LANGSTAGE_AGENT_SPEC, "
-            "or set [agent].spec in langstage.toml)"
+            "or set [agent].spec in langstage.toml)" + detail
         )
 
     # Hand the RESOLVED workspace to the agent via the shared source of truth

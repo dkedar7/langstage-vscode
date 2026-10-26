@@ -2187,6 +2187,45 @@ def test_raw_protocol_no_spec_keeps_json_frame_on_stdout(monkeypatch, tmp_path, 
     assert frame["type"] == "error" and "no agent spec" in frame["error"]
 
 
+def test_no_spec_names_typo_key(monkeypatch, tmp_path, capsys):
+    # gh #171: a typo'd `[agent] specc` key used to be invisible on the run path — the
+    # error said only "no agent spec" and the panel offered the demo with no hint. The
+    # message now names the ignored key, the way --selfcheck already does.
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text('[agent]\nspecc = "my_agent.py:graph"\n')
+    assert main(["--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: no agent spec")
+    assert "agent.specc" in captured.err
+    assert "expected `[agent]` + `spec = ...`" in captured.err
+
+
+def test_no_spec_names_malformed_toml(monkeypatch, tmp_path, capsys):
+    # gh #171: a langstage.toml that doesn't parse is dropped whole, so no agent
+    # resolves. The run-path error now names the file and its parse error.
+    _isolate_config(monkeypatch, tmp_path)
+    (tmp_path / "langstage.toml").write_text('[agent]\nspec = "my_agent.py:graph"\nbad = [\n')
+    assert main(["--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no agent spec" in captured.err
+    assert "langstage.toml" in captured.err
+    assert "doesn't parse" in captured.err
+
+
+def test_no_spec_clean_toml_unchanged(monkeypatch, tmp_path, capsys):
+    # gh #171: a clean, fully-recognized toml reports NO extra detail — the suffix fires
+    # only on a genuine typo/misplacement, not on every no-spec failure.
+    _isolate_config(monkeypatch, tmp_path)
+    assert main(["--message", "hi"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: no agent spec")
+    assert "unknown keys" not in captured.err
+    assert "doesn't parse" not in captured.err
+
+
 # ── gh #85: a checkpointer-LESS graph remembers within one process ──
 #
 # The README used to claim a graph compiled without a checkpointer is stateless across
