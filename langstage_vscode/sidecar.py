@@ -855,6 +855,23 @@ def _malformed_tomls(cfg: Any) -> list[dict]:
         return []
 
 
+def _ignored_spec_reason(cfg: Any) -> str | None:
+    """Why no agent spec resolved when the config *tried* to name one: a typo'd key
+    (gh #124) or a langstage.toml that doesn't parse (gh #169). ``None`` when nothing
+    was configured at all. Shared by ``--selfcheck`` and the run path (gh #171)."""
+    typos = _agent_key_typos(cfg)
+    if typos:
+        return (
+            f"langstage.toml has unknown keys that look like one: {', '.join(typos)} "
+            "(expected `[agent]` + `spec = ...`)"
+        )
+    malformed = _malformed_tomls(cfg)
+    if malformed:
+        files = "; ".join(f"{m['path']} ({m['error']})" for m in malformed)
+        return f"a config file was ignored because it doesn't parse: {files}"
+    return None
+
+
 # `--selfcheck` exit code for an agent whose preflight turn paused on an interrupt
 # (gh #130) — the same "paused awaiting a decision" code `--message` / `--repl` use.
 # The LangStage family exit codes (core ADR 0007,
@@ -2015,6 +2032,12 @@ def _main(argv: list[str] | None = None) -> int:
         )
 
     if not spec:
+        # gh #171: when the toml tried to name an agent (a typo'd key, a file that
+        # doesn't parse), say so -- the same diagnosis --selfcheck gives. The text keeps
+        # its "no agent spec" prefix, which the extension's panel matches.
+        reason = _ignored_spec_reason(cfg)
+        if reason:
+            return fail(f"no agent spec: {reason}. Fix langstage.toml, or pass --agent or --demo.")
         return fail(
             "no agent spec (pass --agent or --demo, set LANGSTAGE_AGENT_SPEC, "
             "or set [agent].spec in langstage.toml)"
