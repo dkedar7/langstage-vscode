@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.41] - 2026-10-31
+
+### Fixed
+- **`--message` and `--repl` start a fresh thread on every run** (gh #174). They used the
+  constant session ids `"once"` and `"repl"`, which become the graph's `thread_id`, so an
+  agent with a durable checkpointer replayed every earlier run's messages into the next one,
+  and one run left paused on an interrupt made every later `--message` re-raise it and exit
+  2. Each `--message` run now uses `once-<uuid>` and each `--repl` process `repl-<uuid>`; a
+  REPL still remembers its own turns. The VS Code panel's sessions are unchanged. Same bug
+  as langstage-core #221.
+
 ## [0.5.40] - 2026-10-26
 
 ### Fixed

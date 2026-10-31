@@ -1522,7 +1522,8 @@ def test_repl_decision_lands_on_the_live_session_thread():
     assert rc == 0
     frames = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
     ends = [f for f in frames if f["type"] == "turn_end"]
-    assert [f["session_id"] for f in ends] == ["repl", "repl"]
+    ids = [f["session_id"] for f in ends]
+    assert len(ids) == 2 and ids[0] == ids[1] and ids[0].startswith("repl-")
 
 
 def test_repl_decision_command_outside_decision_mode_is_refused():

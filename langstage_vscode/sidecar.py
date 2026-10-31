@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import uuid
 from collections import deque
 from typing import Any, Callable, Iterable, Iterator, TextIO
 
@@ -1497,6 +1498,18 @@ class _ReplSink(_OneShotSink):
         super()._on_frame(line)
 
 
+def _fresh_session(prefix: str) -> str:
+    """A new session id (hence thread_id) for one ``--message`` run or ``--repl`` process.
+
+    A constant id ("once", "repl") meant an agent with a durable checkpointer replayed
+    every earlier run's history into the next one, and a run left paused on an
+    interrupt made every later ``--message`` re-raise it and exit 2 (langstage-core
+    #221, gh #174). The VS Code panel's own sessions stay persistent; only the CLI
+    entry points get a fresh thread per invocation.
+    """
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
 def _run_repl(
     graph: Any,
     *,
@@ -1505,7 +1518,7 @@ def _run_repl(
     stdin: Iterable[str] | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
-    session_id: str = "repl",
+    session_id: str | None = None,
     prompt: str = "> ",
     show_prompt: bool | None = None,
     extractors: Iterable[Any] = (),
@@ -1565,6 +1578,8 @@ def _run_repl(
     """
     import sys
 
+    if session_id is None:
+        session_id = _fresh_session("repl")
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
@@ -1707,7 +1722,7 @@ def _run_once(
     import sys
 
     commands = [
-        json.dumps({"type": "message", "session_id": "once", "content": message}),
+        json.dumps({"type": "message", "session_id": _fresh_session("once"), "content": message}),
         json.dumps({"type": "shutdown"}),
     ]
     sink = _OneShotSink(sys.stdout, sys.stderr, as_json=as_json)
