@@ -246,7 +246,7 @@ the raw event frames instead of the assembled text, just like `--message`:
 
 ```bash
 langstage-vscode-sidecar --agent ./my.py:graph --repl
-> my name is Kedar
+> my name is Ada
 ...
 > what is my name?
 ...
@@ -259,7 +259,9 @@ to any graph that lacks one, so `--repl` (one process, one `session_id`) verifie
 memory and catches a wrong-`session_id` mistake before wiring up the extension. What it can't
 prove is *durable* memory: that in-memory state is lost when the process ends, so persistence
 across separate processes still needs a persistent checkpointer (see the memory note under
-[Sidecar protocol](#sidecar-protocol)).
+[Sidecar protocol](#sidecar-protocol)). Each `--message` run and each `--repl` process starts a
+fresh thread, so earlier runs never leak into a new one; to check durable memory, send two
+`message` commands with the same `session_id` over the stdio protocol from two processes.
 
 Both turn-drivers are **interrupt-aware**. If your agent pauses on a human-in-the-loop
 `interrupt(...)` (the common `deepagents` / LangGraph approval pattern), the turn is no longer
