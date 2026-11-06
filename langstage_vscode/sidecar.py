@@ -46,7 +46,7 @@ from langstage_core import apply_workspace, load_agent_spec, workspace_root
 from langstage_core.console import safe_write
 # Decision-verb matching (core >= 1.0.37, gh #117/#114): canonical verbs plus the legacy
 # aliases (accept/ignore/response), which both drivers validate a decision against.
-from langstage_core.resume import normalize_decision
+from langstage_core.resume import decision_problems, normalize_decision
 
 DEFAULT_MAX_RESULT_LEN = 50_000
 
@@ -384,6 +384,9 @@ def run(
     # gh #117: the value is the pending interrupt's own ``allowed_decisions``, so a
     # ``decision`` is validated against it before it is ACKed, as ``--repl`` does.
     pending_interrupts: dict[str, list[str]] = {}
+    # core #227: the pending interrupt frame itself, so a decision's shape (an ``edit``
+    # needs ``edited_action``, a ``respond`` a ``message``) is checked before the ACK too.
+    pending_frames: dict[str, dict] = {}
 
     while True:
         raw = intake.next_command()
@@ -506,6 +509,12 @@ def run(
                         + (" | ".join(allowed) if allowed else "(none advertised)")
                     )
                     break
+            if refusal is None:
+                problems = decision_problems(
+                    {"decisions": decisions}, pending_frames.get(session_id)
+                )
+                if problems:
+                    refusal = "; ".join(problems)
             if refusal is not None:
                 emit({"type": "error", "error": refusal})
                 emit({"type": "turn_end", "session_id": session_id})
@@ -553,12 +562,14 @@ def run(
             _rollback_thread(agui_agent, session_id, pre_turn)
             emit({"type": "cancelled", "session_id": session_id})
             pending_interrupts.pop(session_id, None)
+            pending_frames.pop(session_id, None)
         elif saw_interrupt:
-            pending_interrupts[session_id] = _interrupt_allowed(
-                turn_interrupt[0] if turn_interrupt else {}
-            )
+            frame = turn_interrupt[0] if turn_interrupt else {}
+            pending_interrupts[session_id] = _interrupt_allowed(frame)
+            pending_frames[session_id] = frame
         else:
             pending_interrupts.pop(session_id, None)
+            pending_frames.pop(session_id, None)
         emit({"type": "turn_end", "session_id": session_id})
 
     # The loop served the agent and ended on `shutdown` or EOF. An `error` frame along
