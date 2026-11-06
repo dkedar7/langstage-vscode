@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.42] - 2026-11-06
+
+### Fixed
+- **A decision with the wrong shape no longer loses the pending approval** (langstage-core
+  #227). The sidecar already refused a verb the interrupt doesn't allow (gh #117). An
+  allowed verb with the wrong shape, such as an `edit` without `edited_action` or a
+  `respond` without a `message`, was ACKed and sent. The approval middleware refused it,
+  the turn errored, and the session forgot its interrupt, so a correct answer was then
+  refused with "no interrupt pending". The decision is now checked with
+  `langstage_core.decision_problems` before the ACK and refused like a bad verb (`error`,
+  then `turn_end`, nothing sent), and the approval stays answerable. `--repl` gets the same
+  check. Requires langstage-core >= 1.0.58, which also recovers a thread an older version
+  left stuck on a refused answer.
+
 ## [0.5.41] - 2026-10-31
 
 ### Fixed
