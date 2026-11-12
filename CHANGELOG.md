@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.43] - 2026-11-12
+
+### Changed
+- **Requires langstage-core >= 1.0.62**, so a turn stopped mid-tool no longer leaves an
+  unanswered tool call in the thread (langstage-core #237). Before, pressing Stop while a
+  tool ran could leave the model's tool call with no result, and the next message on that
+  session could be refused by the model provider. Core now answers each such call with a
+  "Cancelled by user" result before the next turn starts. No sidecar code changed.
+
 ## [0.5.42] - 2026-11-06
 
 ### Fixed
