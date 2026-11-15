@@ -32,9 +32,11 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       // storageUri, and conversations last only as long as the window.
       store: new ConversationStore(storageUri?.scheme === 'file' ? storageUri.fsPath : undefined),
       createClient: ({ demo }) => {
-        const { python, agentSpec, workspace } = readLaunchConfig();
+        const { python, interpreter, agentSpec, workspace } = readLaunchConfig();
         return new SidecarClient({
           python,
+          pythonHow: interpreter.how,
+          launchError: interpreter.error,
           ...sidecarLaunch(workspace, agentSpec, demo ? 'tools' : undefined),
           // gh #89: warn (once per interpreter) about an outdated sidecar.
           onReady: (info) => outdatedSidecarWarnings.check(python, info),

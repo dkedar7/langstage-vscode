@@ -160,7 +160,29 @@ In VS Code settings:
 | Setting | Description | Default |
 |---|---|---|
 | `langstage.agentSpec` | Your agent, as `path/to/agent.py:graph` or `module:graph` | _(falls back to `LANGSTAGE_AGENT_SPEC` / `langstage.toml`)_ |
-| `langstage.pythonPath` | Python interpreter that has `langstage-vscode` installed | `python` |
+| `langstage.pythonPath` | Python interpreter that has `langstage-vscode` installed | _(the workspace's `.venv`, else `python`)_ |
+
+**Which Python runs the sidecar** (extension 0.6.7+). Usually you set nothing: with
+`langstage.pythonPath` empty, the extension uses the workspace folder's `.venv` (then
+`venv`) when it has an interpreter, and otherwise `python` on `PATH`. The panel's status
+line shows the choice (`Python: .venv (auto-detected)`), with the full path in its tooltip.
+
+To point at another interpreter, the setting accepts `${workspaceFolder}`,
+`${workspaceFolder:<name>}` (multi-root), `${userHome}`, `${env:<NAME>}` and a leading `~`.
+A relative path is resolved against the workspace folder, and a venv's folder stands for
+its interpreter, so one value works on Windows, macOS and Linux and can be committed in
+`.vscode/settings.json` next to your `langstage.toml`:
+
+```json
+{
+  "langstage.pythonPath": "${workspaceFolder}/backend/.venv"
+}
+```
+
+The full order is: `langstage.pythonPath`, the legacy `deepagent.pythonPath`,
+`LANGSTAGE_PYTHON` in the editor's environment, the workspace venv, `python` on `PATH`.
+Other `${...}` variables are refused by name. This does not use the Python extension, so
+it behaves the same in Cursor, VSCodium, Windsurf and code-server.
 
 The sidecar resolves its configuration through the family-standard chain —
 **defaults < `langstage.toml` (global + project) < `LANGSTAGE_*` env < CLI

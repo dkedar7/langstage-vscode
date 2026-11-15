@@ -96,7 +96,7 @@ export async function handler(
   const metadata: Record<string, unknown> = { [SESSION_KEY]: sessionId };
   const result: vscode.ChatResult = { metadata };
 
-  const { python, agentSpec, workspace } = readLaunchConfig();
+  const { python, interpreter, agentSpec, workspace } = readLaunchConfig();
 
   // HITL: `/approve`, `/reject`, `/respond`, `/edit` answer the interrupt this
   // conversation is paused on, as a `decision` on the same session, and the resumed
@@ -149,7 +149,9 @@ export async function handler(
   }
 
   try {
-    const sc = getOrCreateClient(python, agentSpec, workspace);
+    // gh #178: an interpreter setting that can't be expanded says so, and spawns nothing.
+    if (interpreter.error) throw new Error(interpreter.error);
+    const sc = getOrCreateClient(python, interpreter.how, agentSpec, workspace);
     const turn = await runTurn(sc, sessionId, command, stream, token);
     // A turn that ends on an interrupt leaves the conversation paused. So does a
     // decision the sidecar refused (an error before any `ack`): the interrupt it was
@@ -169,7 +171,12 @@ export async function handler(
 }
 
 /** Reuse the live client if its config matches; otherwise (re)spawn one. */
-function getOrCreateClient(python: string, agentSpec: string, workspace: string): SidecarClient {
+function getOrCreateClient(
+  python: string,
+  pythonHow: string,
+  agentSpec: string,
+  workspace: string,
+): SidecarClient {
   const key = [python, agentSpec, workspace].join('|');
   if (client && client.sc.alive && client.key === key) {
     return client.sc;
@@ -177,6 +184,7 @@ function getOrCreateClient(python: string, agentSpec: string, workspace: string)
   disposeParticipantSidecar(); // config changed or process is gone
   const sc = new SidecarClient({
     python,
+    pythonHow,
     ...sidecarLaunch(workspace, agentSpec),
     // gh #89: warn (once per interpreter) about an outdated sidecar.
     onReady: (info) => outdatedSidecarWarnings.check(python, info),

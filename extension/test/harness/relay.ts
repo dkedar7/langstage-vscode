@@ -13,6 +13,7 @@
  * Python: $LANGSTAGE_PYTHON (a path or a command), default `python`; it must have
  * langstage-vscode installed (`pip install -e .` at the repo root).
  */
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -27,6 +28,8 @@ const { PanelSession } = require('../../dist/panel/panelSession');
 const { ConversationStore } = require('../../dist/panel/conversationStore');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { SidecarClient, sidecarLaunch } = require('../../dist/sidecar');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { resolvePython, venvInterpreter } = require('../../dist/pythonPath');
 
 export const HARNESS = pathToFileURL(path.join(__dirname, 'index.html')).href;
 export const FIXTURE_AGENT = `${path.resolve(__dirname, '..', 'fixtures', 'hitl_agent.py')}:graph`;
@@ -37,6 +40,35 @@ export function pythonCommand(): string {
   return /[\\/]/.test(p) ? path.resolve(p) : p;
 }
 
+/**
+ * A venv at `<workspace>/.venv` that can run the sidecar (gh #178), made from the harness
+ * Python: `venv --without-pip`, plus a `.pth` that adds that Python's site-packages (and
+ * runs their `.pth` files, so an editable install works). Returns its interpreter.
+ */
+export function makeWorkspaceVenv(workspace: string): string {
+  const python = pythonCommand();
+  const venv = path.join(workspace, '.venv');
+  execFileSync(python, ['-m', 'venv', '--without-pip', venv], { stdio: 'pipe' });
+  const interpreter = path.join(venv, ...venvInterpreter(process.platform));
+  const parentSites = JSON.parse(
+    execFileSync(
+      python,
+      ['-c', "import json, sys; print(json.dumps([p for p in sys.path if p.endswith(('site-packages', 'dist-packages'))]))"],
+      { encoding: 'utf8' },
+    ),
+  ) as string[];
+  const ownSite = execFileSync(
+    interpreter,
+    ['-c', "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+    { encoding: 'utf8' },
+  ).trim();
+  fs.writeFileSync(
+    path.join(ownSite, '_harness_parent.pth'),
+    `import site; [site.addsitedir(p) for p in ${JSON.stringify(parentSites)}]\n`,
+  );
+  return interpreter;
+}
+
 export interface PanelOptions {
   /**
    * 'demo': the keyless `--demo=tools` agent, chosen the way a user does (the status
@@ -45,6 +77,16 @@ export interface PanelOptions {
   agent: 'demo' | 'none' | string;
   /** Workspace storage for the ConversationStore (a temp dir by default). */
   storeDir?: string;
+  /**
+   * `langstage.pythonPath` as someone would set it (gh #178). Default: unset, with the
+   * harness Python in `$LANGSTAGE_PYTHON`, which is the next thing the extension looks at.
+   */
+  pythonPath?: string;
+  /**
+   * Put a venv that can run the sidecar at `<workspace>/.venv`, and take the harness
+   * Python out of the environment: the extension has to find the venv itself.
+   */
+  workspaceVenv?: boolean;
 }
 
 type HostMsg = { type: string; [k: string]: unknown };
@@ -63,6 +105,8 @@ export class Relay {
    * loading would drop a message anyway.
    */
   private uiReady = false;
+  /** The interpreter of the venv `workspaceVenv` put in the workspace. */
+  venvPython: string | undefined;
 
   constructor(
     private readonly page: Page,
@@ -120,8 +164,19 @@ export class Relay {
 
   private createSession(): any {
     const { agent } = this.opts;
-    const python = pythonCommand();
     const workspace = this.workspace;
+    // The interpreter is chosen exactly as config.ts does (gh #178): the setting, else
+    // $LANGSTAGE_PYTHON, else the workspace's venv, else `python`.
+    if (this.opts.workspaceVenv && !this.venvPython) this.venvPython = makeWorkspaceVenv(workspace);
+    const interpreter = resolvePython({
+      setting: this.opts.pythonPath,
+      env: this.opts.workspaceVenv ? {} : { LANGSTAGE_PYTHON: pythonCommand() },
+      folders: [{ name: path.basename(workspace), path: workspace }],
+      home: os.homedir(),
+      platform: process.platform,
+      exists: (p: string) => fs.existsSync(p),
+    });
+    const python: string = interpreter.python;
     // No agent from the environment: only what this test configures.
     const env = { ...process.env };
     delete env.LANGSTAGE_AGENT_SPEC;
@@ -143,6 +198,8 @@ export class Relay {
       createClient: ({ demo }: { demo: boolean }) =>
         new SidecarClient({
           python,
+          pythonHow: interpreter.how,
+          launchError: interpreter.error,
           ...sidecarLaunch(workspace, spec, demo ? 'tools' : undefined),
           env,
         }),

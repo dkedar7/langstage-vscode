@@ -58,6 +58,11 @@ export interface PanelStatus {
    * installs it there, for the Copy button (gh #160).
    */
   installCommand?: string;
+  /**
+   * The interpreter the sidecar runs in and how it was chosen: a setting's name,
+   * `.venv (auto-detected)` or `python on PATH` (gh #178). Never chosen silently.
+   */
+  python?: { path: string; how?: string };
 }
 
 export interface ConversationInfo {

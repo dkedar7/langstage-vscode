@@ -454,3 +454,43 @@ test('gh #89: a sidecar that does not list cancel gets none: the turn ends here 
   assert.equal(client.alive, false);
   assert.deepEqual(statuses, ['starting', 'ready', 'stopped']);
 });
+
+test('gh #178: a launchError fails the start with that message and spawns nothing', async () => {
+  const { client, procs } = makeClient({
+    python: '${workspaceRoot}/.venv/bin/python',
+    pythonHow: 'langstage.pythonPath',
+    launchError: "langstage.pythonPath uses ${workspaceRoot}, which isn't supported here.",
+  });
+  await assert.rejects(client.start(), /uses \$\{workspaceRoot\}, which isn't supported here/);
+  assert.equal(procs.length, 0, 'nothing was spawned');
+  assert.equal(client.status.state, 'failed');
+  assert.match(client.status.error ?? '', /isn't supported here/);
+  // A turn queued behind it is rejected with the same message, not left pending.
+  const again = makeClient({ launchError: 'no folder is open' });
+  await assert.rejects(again.client.runTurn('s', { type: 'message', content: 'hi' }).done, /no folder is open/);
+});
+
+test('gh #178: spawn ENOENT names the interpreter, where it came from and what to do', async () => {
+  const { client, procs } = makeClient({ python: '/work/app/.venv/bin/python', pythonHow: '.venv (auto-detected)' });
+  const started = client.start();
+  await tick();
+  const enoent = Object.assign(new Error('spawn /work/app/.venv/bin/python ENOENT'), { code: 'ENOENT' });
+  procs[0].emit('error', enoent);
+  await assert.rejects(
+    started,
+    /^Error: Python interpreter not found: \/work\/app\/\.venv\/bin\/python \(from \.venv \(auto-detected\)\)\./,
+  );
+  assert.match(client.status.error ?? '', /Set langstage\.pythonPath/);
+  // Any other spawn error is reported as it is.
+  const other = makeClient();
+  const s2 = other.client.start();
+  await tick();
+  other.procs[0].emit('error', Object.assign(new Error('spawn python EACCES'), { code: 'EACCES' }));
+  await assert.rejects(s2, /spawn python EACCES/);
+});
+
+test('gh #178: the client reports its interpreter and how it was chosen', () => {
+  const { client } = makeClient({ python: '/v/bin/python', pythonHow: 'langstage.pythonPath' });
+  assert.deepEqual(client.interpreter, { path: '/v/bin/python', how: 'langstage.pythonPath' });
+  assert.deepEqual(makeClient().client.interpreter, { path: 'python' });
+});

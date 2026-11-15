@@ -2,7 +2,7 @@
   "name": "langstage-vscode",
   "displayName": "LangStage",
   "description": "Chat with your LangGraph agent in VS Code, Cursor, VSCodium and other VS Code-based editors, with or without Copilot. The VS Code stage of the LangStage family.",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "publisher": "dkedar7",
   "engines": {
     "vscode": "^1.95.0"
@@ -131,8 +131,8 @@
         },
         "langstage.pythonPath": {
           "type": "string",
-          "default": "python",
-          "description": "Python interpreter used to launch the langstage-vscode sidecar (must have langstage-vscode installed)."
+          "default": "",
+          "markdownDescription": "Python interpreter that runs the langstage-vscode sidecar (it must have `langstage-vscode` installed). Leave empty to use the workspace folder's `.venv` (or `venv`) when it has an interpreter, else `python` on `PATH`. Accepts `${workspaceFolder}`, `${workspaceFolder:<name>}`, `${userHome}`, `${env:<NAME>}` and a leading `~`; a relative path is resolved against the workspace folder; a venv's folder stands for its interpreter, so `${workspaceFolder}/.venv` works on every OS and can be committed in `.vscode/settings.json`. The panel's status line shows which interpreter was chosen."
         },
         "deepagent.agentSpec": {
           "type": "string",

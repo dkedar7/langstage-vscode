@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Extension 0.6.7] - 2026-11-15
+
+Works with any sidecar; needs no new one.
+
+### Added
+- **`langstage.pythonPath` takes variables, and an unset one finds the workspace venv**
+  (gh #178). The setting was passed to `spawn` verbatim, so the only value that worked
+  everywhere was a per-machine absolute path, and a team could not commit it. Now:
+  - `${workspaceFolder}`, `${workspaceFolder:<name>}`, `${userHome}`, `${env:<NAME>}` and
+    a leading `~` are expanded; a relative path is resolved against the first workspace
+    folder on every OS (POSIX did that by accident, through `cwd`).
+  - A venv's folder stands for its interpreter (`bin/python`, or `Scripts\python.exe` on
+    Windows), so `"langstage.pythonPath": "${workspaceFolder}/.venv"` is one value for
+    every OS.
+  - With nothing set, the order is `deepagent.pythonPath` (legacy), `LANGSTAGE_PYTHON` in
+    the editor's environment, the first workspace folder's `.venv` then `venv` if it has
+    an interpreter for this OS, and last `python` on `PATH`.
+  - The panel's status line names the interpreter and how it was chosen
+    (`Ready · my_agent.py:graph · Python: .venv (auto-detected)`), with the full path in
+    the tooltip and on a failed start, so the choice is never silent. The install and
+    upgrade commands the panel offers are for that interpreter.
+  - An absolute path with no variable, and a bare command, are passed through unchanged.
+  - No dependency on the Python extension, so it works the same in Cursor, VSCodium,
+    Windsurf and code-server. The extension stays disabled in Restricted Mode, so a venv
+    is only ever picked from a workspace you trust.
+
+### Changed
+- An unknown `${...}` (for example `${workspaceRoot}` or `${command:...}`) fails the start
+  with the variable's name and the supported list, and spawns nothing. An interpreter that
+  doesn't exist is reported as `Python interpreter not found: <path> (from <where>)`. Both
+  used to surface as `spawn ... ENOENT`.
+- `langstage.pythonPath`'s contributed default is now empty (it was `python`). Behaviour
+  is the same when there is no workspace venv: `python` on `PATH`.
+
 ## [0.5.43] - 2026-11-12
 
 ### Changed

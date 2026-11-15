@@ -13,6 +13,19 @@ function agentLabel(s: PanelStatus): string {
   return s.agentSpec || 'agent from langstage.toml / LANGSTAGE_AGENT_SPEC';
 }
 
+/** Which interpreter runs the agent and how it was chosen (gh #178), e.g. `.venv (auto-detected)`. */
+function pythonLabel(s: PanelStatus): string | undefined {
+  if (!s.python) return undefined;
+  return s.python.how ?? s.python.path;
+}
+
+/** The tooltip: the agent, then the interpreter's full path. */
+function readyTitle(s: PanelStatus): string {
+  const how = s.python?.how ? ` (${s.python.how})` : '';
+  return s.python ? `${agentLabel(s)}
+Python: ${s.python.path}${how}` : agentLabel(s);
+}
+
 export function StatusLine({ status }: { status: PanelStatus }) {
   const [showLog, setShowLog] = useState(false);
   switch (status.phase) {
@@ -25,9 +38,12 @@ export function StatusLine({ status }: { status: PanelStatus }) {
       );
     case 'ready':
       return (
-        <div className="ls-status" role="status" title={agentLabel(status)}>
+        <div className="ls-status" role="status" title={readyTitle(status)}>
           <span className="ls-dot ls-dot-ok" />
-          <span className="ls-ellipsis">Ready · {agentLabel(status)}</span>
+          <span className="ls-ellipsis">
+            Ready · {agentLabel(status)}
+            {pythonLabel(status) && <span className="ls-python"> · Python: {pythonLabel(status)}</span>}
+          </span>
         </div>
       );
     case 'stopped':
@@ -49,6 +65,12 @@ export function StatusLine({ status }: { status: PanelStatus }) {
             <strong>{status.noAgent ? 'No agent configured' : 'The agent failed to start'}</strong>
           </div>
           <div className="ls-pre ls-status-error">{status.error}</div>
+          {status.python && (
+            <div className="ls-muted ls-python">
+              Python: {status.python.path}
+              {status.python.how ? ` (${status.python.how})` : ''}
+            </div>
+          )}
           {status.noAgent && (
             <div className="ls-muted">
               Set <code>langstage.agentSpec</code> (for example <code>./my_agent.py:graph</code>), or
