@@ -23,9 +23,10 @@ from PyPI. Installing the extension alone is not enough: you need both parts.
    VSCodium and Windsurf install it from
    [Open VSX](https://open-vsx.org/extension/dkedar7/langstage-vscode).
 
-3. **Point `langstage.pythonPath` at that interpreter** if it isn't the `python` on your
-   `PATH`, for example `/home/me/project/.venv/bin/python` or
-   `C:\Users\me\project\.venv\Scripts\python.exe`.
+3. **Check the interpreter.** If that environment is the workspace folder's `.venv` (or
+   `venv`), there is nothing to set: the extension finds it, and the status line shows
+   `Python: .venv (auto-detected)`. Otherwise set `langstage.pythonPath`, for example
+   `${workspaceFolder}/backend/.venv` or `~/venvs/agent`.
 
 If the interpreter doesn't have the sidecar, the panel says so and gives you the
 `<python> -m pip install langstage-vscode` command for it. The extension expects
@@ -76,7 +77,11 @@ folder, shows the root the panel and `@langstage` use.
 | Setting | What it does | Default |
 |---|---|---|
 | `langstage.agentSpec` | Your agent, as `path/to/agent.py:graph` or `module:graph`. Empty falls back to `LANGSTAGE_AGENT_SPEC` or `langstage.toml`. | _(empty)_ |
-| `langstage.pythonPath` | The Python interpreter that runs the sidecar. It must have `langstage-vscode` installed. | `python` |
+| `langstage.pythonPath` | The Python interpreter that runs the sidecar. It must have `langstage-vscode` installed. Accepts `${workspaceFolder}`, `${workspaceFolder:<name>}`, `${userHome}`, `${env:<NAME>}` and a leading `~`; a relative path is resolved against the workspace folder; a venv's folder stands for its interpreter. | _(empty: the workspace's `.venv` or `venv`, else `python` on `PATH`)_ |
+
+A value like `"langstage.pythonPath": "${workspaceFolder}/.venv"` works on every OS, so a
+team can commit it in `.vscode/settings.json`. The status line always shows which
+interpreter was chosen and why.
 
 The old `deepagent.agentSpec` and `deepagent.pythonPath` settings are still read as a
 fallback.

@@ -241,3 +241,45 @@ test('malformed messages and unsafe links are dropped', () => {
   assert.deepEqual(opened, ['https://example.com/x']);
   assert.equal(procs.length, 0);
 });
+
+test('gh #178: the status names the interpreter and how it was chosen, ready or failed', async () => {
+  const { spawn, procs } = fakeSpawn();
+  const posted: HostToWebview[] = [];
+  let launchError: string | undefined;
+  const session = new PanelSession({
+    post: (m) => posted.push(m),
+    createClient: () =>
+      new SidecarClient({
+        python: '/work/app/.venv/bin/python',
+        pythonHow: '.venv (auto-detected)',
+        launchError,
+        args: [],
+        cwd: '.',
+        spawn,
+        exitGraceMs: 20,
+      }),
+    agentSpec: () => 'agent.py:graph',
+    openExternal: () => undefined,
+    openSettings: () => undefined,
+    copy: () => undefined,
+  });
+  const statuses = () => posted.flatMap((m) => (m.type === 'status' ? [m.status] : []));
+  session.handle({ v: 1, type: 'ui/ready' });
+  await tick();
+  procs[0].emitFrames([{ type: 'ready' }]);
+  await tick();
+  const ready = statuses().pop();
+  assert.equal(ready?.phase, 'ready');
+  assert.deepEqual(ready?.python, { path: '/work/app/.venv/bin/python', how: '.venv (auto-detected)' });
+
+  // A setting that can't be expanded: failed, with the reason, and nothing spawned.
+  launchError = "langstage.pythonPath uses ${nope}, which isn't supported here.";
+  session.restart();
+  await tick();
+  const failed = statuses().pop();
+  assert.equal(failed?.phase, 'failed');
+  assert.match(failed?.error ?? '', /uses \$\{nope\}/);
+  assert.equal(failed?.python?.how, '.venv (auto-detected)');
+  assert.equal(procs.length, 1, 'the second start spawned nothing');
+  session.dispose();
+});

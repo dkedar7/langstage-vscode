@@ -73,6 +73,13 @@ describe('LangStage in VS Code', () => {
         90_000,
         'the demo sidecar to be ready',
       );
+      // gh #178: the workspace setting is `${env:LANGSTAGE_SMOKE_PYTHON}`; the host
+      // expanded it, and the status says which interpreter runs and why.
+      const ready = posted.filter((m) => m.type === 'status' && m.status.phase === 'ready').pop();
+      assert.deepEqual(ready.status.python, {
+        path: process.env.LANGSTAGE_SMOKE_PYTHON,
+        how: 'langstage.pythonPath',
+      });
       api.panel.handleForTests({ v: 1, type: 'ui/ready' });
       const restore = posted.filter((m) => m.type === 'restore').pop();
       const id = restore.activeId;

@@ -4,6 +4,31 @@ Changes to the LangStage VS Code extension. The Python sidecar (`langstage-vscod
 PyPI) is released separately; its changes, and this history in full, are in the
 [repository CHANGELOG](https://github.com/dkedar7/langstage-vscode/blob/main/CHANGELOG.md).
 
+## [0.6.7] - 2026-11-15
+
+Needs no new sidecar.
+
+### Added
+- **`langstage.pythonPath` can be committed for a team.** It now accepts
+  `${workspaceFolder}`, `${workspaceFolder:<name>}`, `${userHome}`, `${env:<NAME>}` and a
+  leading `~`, and a relative path is resolved against the workspace folder on every OS.
+  A venv's folder stands for its interpreter, so `"${workspaceFolder}/.venv"` works on
+  Windows, macOS and Linux alike. An absolute path or a bare command (`python3`) behaves
+  as before.
+- **The workspace's venv is found on its own.** With `langstage.pythonPath` unset, the
+  extension uses the workspace folder's `.venv` (then `venv`) when it has an interpreter,
+  and only then `python` on `PATH`. Before, an unset setting always meant the `python` on
+  VS Code's own `PATH`, which is rarely the project's.
+- **The status line says which Python runs your agent**, and why: `.venv (auto-detected)`,
+  `langstage.pythonPath`, or `python on PATH`. Hover for the full path.
+
+### Changed
+- An unknown `${...}` in `langstage.pythonPath` is refused by name, and an interpreter
+  that doesn't exist is reported as "Python interpreter not found", with the path and
+  where it came from. Both used to end as `spawn ... ENOENT`.
+- `LANGSTAGE_PYTHON` in the editor's environment is read when the setting is empty,
+  before the workspace venv.
+
 ## [0.6.6] - 2026-10-19
 
 Needs no new sidecar.

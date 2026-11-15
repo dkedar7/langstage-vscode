@@ -19,16 +19,19 @@ async function main() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ls-smoke-'));
   const envPython = process.env.LANGSTAGE_PYTHON || 'python';
   const python = /[\\/]/.test(envPython) ? path.resolve(envPython) : envPython;
+  // gh #178: the setting is written with a variable, as a committed settings.json would
+  // be, so the run goes through the extension's own expansion in a real editor.
   fs.mkdirSync(path.join(workspace, '.vscode'));
   fs.writeFileSync(
     path.join(workspace, '.vscode', 'settings.json'),
-    JSON.stringify({ 'langstage.pythonPath': python }, null, 2),
+    JSON.stringify({ 'langstage.pythonPath': '${env:LANGSTAGE_SMOKE_PYTHON}' }, null, 2),
   );
 
   await runTests({
     version: process.env.VSCODE_TEST_VERSION || 'stable',
     extensionDevelopmentPath,
     extensionTestsPath,
+    extensionTestsEnv: { LANGSTAGE_SMOKE_PYTHON: python },
     launchArgs: [
       workspace,
       '--disable-extensions', // no Copilot, nothing else: only this extension

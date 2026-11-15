@@ -19,6 +19,7 @@
 import { spawn as nodeSpawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import * as readline from 'readline';
+import { interpreterNotFoundMessage } from './pythonPath';
 
 /** One NDJSON frame from the sidecar. Unknown types and keys are passed through. */
 export interface SidecarFrame {
@@ -71,6 +72,13 @@ export type SpawnFn = (command: string, args: string[], options: SpawnOptions) =
 export interface SidecarOptions {
   /** The Python interpreter. */
   python: string;
+  /** How `python` was chosen, e.g. `.venv (auto-detected)` (gh #178). For messages only. */
+  pythonHow?: string;
+  /**
+   * The interpreter setting can't be used (an unknown `${...}`, no folder open): fail the
+   * start with this message and spawn nothing.
+   */
+  launchError?: string;
   /** Arguments after the interpreter, e.g. from `sidecarArgs()`. */
   args: string[];
   cwd: string;
@@ -320,6 +328,11 @@ export class SidecarClient {
     return this._info && { ...this._info };
   }
 
+  /** The interpreter this client launches, and how it was chosen (gh #178). */
+  get interpreter(): { path: string; how?: string } {
+    return { path: this.options.python, ...(this.options.pythonHow ? { how: this.options.pythonHow } : {}) };
+  }
+
   /** True while the process is starting or ready (not failed, stopped or disposed). */
   get alive(): boolean {
     return this._status.state === 'starting' || this._status.state === 'ready';
@@ -503,6 +516,11 @@ export class SidecarClient {
         }
       };
 
+      if (this.options.launchError) {
+        settle(new Error(this.options.launchError));
+        return;
+      }
+
       let proc: ChildProcess;
       try {
         // cwd anchors the sidecar's langstage.toml walk-up at the workspace.
@@ -579,7 +597,10 @@ export class SidecarClient {
         this.route(frame);
       });
 
-      proc.on('error', (err: Error) => {
+      proc.on('error', (raw: Error) => {
+        // `spawn <python> ENOENT` says neither which setting chose it nor what to do.
+        const missing = (raw as NodeJS.ErrnoException).code === 'ENOENT';
+        const err = missing ? new Error(interpreterNotFoundMessage(python, this.options.pythonHow)) : raw;
         settle(err);
         this.onProcessGone(err);
       });

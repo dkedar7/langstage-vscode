@@ -256,3 +256,56 @@ test('a bad agent spec shows the startup error verbatim', async ({ page }) => {
   await expect(page.getByRole('alert')).toContainText('The agent failed to start');
   await expect(page.getByRole('alert')).toContainText('does_not_exist.py');
 });
+
+// gh #178: which Python runs the sidecar. The setting takes ${workspaceFolder} and friends,
+// an unset one finds the workspace's venv, and the status line says which was chosen.
+test('gh #178: with nothing set, the workspace .venv runs the agent and the status says so', async ({ page }) => {
+  relay = new Relay(page, { agent: 'demo', workspaceVenv: true });
+  await relay.open();
+  const ready = page.getByRole('status').filter({ hasText: 'Ready' });
+  await expect(ready).toBeVisible({ timeout: 90_000 });
+  await expect(ready).toContainText('Python: .venv (auto-detected)');
+  const status = [...relay.posted].reverse().find((m) => m.type === 'status') as
+    | { status: { python?: { path: string; how?: string } } }
+    | undefined;
+  expect(status?.status.python).toEqual({ path: relay.venvPython, how: '.venv (auto-detected)' });
+  expect(relay.venvPython?.startsWith(relay.workspace)).toBe(true);
+  // The tooltip carries the full path.
+  await expect(ready).toHaveAttribute('title', new RegExp('Python: .*\\.venv.*\\(\\.venv \\(auto-detected\\)\\)'));
+  // That interpreter really serves turns.
+  await send(page, 'please use a tool');
+  await expect(lastReply(page)).toContainText('The demo tool returned');
+});
+
+test('gh #178: ${workspaceFolder}/.venv in langstage.pythonPath is the venv interpreter on any OS', async ({ page }) => {
+  relay = new Relay(page, { agent: 'demo', workspaceVenv: true, pythonPath: '${workspaceFolder}/.venv' });
+  await relay.open();
+  const ready = page.getByRole('status').filter({ hasText: 'Ready' });
+  await expect(ready).toBeVisible({ timeout: 90_000 });
+  await expect(ready).toContainText('Python: langstage.pythonPath');
+  const status = [...relay.posted].reverse().find((m) => m.type === 'status') as
+    | { status: { python?: { path: string; how?: string } } }
+    | undefined;
+  expect(status?.status.python).toEqual({ path: relay.venvPython, how: 'langstage.pythonPath' });
+});
+
+test('gh #178: an unknown variable is refused by name, and nothing is started', async ({ page }) => {
+  relay = new Relay(page, { agent: 'demo', pythonPath: '${workspaceRoot}/.venv/bin/python' });
+  await relay.open();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('The agent failed to start');
+  await expect(alert).toContainText("langstage.pythonPath uses ${workspaceRoot}, which isn't supported here");
+  await expect(alert).toContainText('${workspaceFolder}');
+  expect(relay.frames()).toEqual([]);
+});
+
+test('gh #178: a missing interpreter says which one and where it came from', async ({ page }) => {
+  relay = new Relay(page, { agent: 'demo', pythonPath: '${workspaceFolder}/no-such-venv/python' });
+  await relay.open();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('Python interpreter not found:');
+  await expect(alert).toContainText('no-such-venv');
+  await expect(alert).toContainText('(from langstage.pythonPath)');
+  await expect(alert).toContainText('leave it empty to use the workspace');
+  await expect(alert.getByRole('button', { name: 'Open settings' })).toBeVisible();
+});
