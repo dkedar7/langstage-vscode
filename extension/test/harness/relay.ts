@@ -62,9 +62,12 @@ export function makeWorkspaceVenv(workspace: string): string {
     ['-c', "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
     { encoding: 'utf8' },
   ).trim();
+  // `site` runs a .pth line with exec() inside a function. Before Python 3.12 a list
+  // comprehension there has its own scope and can't see the `site` this line imports
+  // (NameError, gh #180), so map() over the paths instead.
   fs.writeFileSync(
     path.join(ownSite, '_harness_parent.pth'),
-    `import site; [site.addsitedir(p) for p in ${JSON.stringify(parentSites)}]\n`,
+    `import site; list(map(site.addsitedir, ${JSON.stringify(parentSites)}))\n`,
   );
   return interpreter;
 }
