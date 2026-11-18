@@ -32,6 +32,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import unicodedata
 import uuid
 from collections import deque
 from typing import Any, Callable, Iterable, Iterator, TextIO
@@ -1093,31 +1095,126 @@ def _selfcheck(
     return verdict(True, ok_msg)
 
 
+# The longest action name / verb the interrupt notice prints before cutting it off.
+_NOTICE_TEXT_MAX = 80
+
+# A name made only of these needs no quoting in the notice: every real tool name and
+# the README's own examples (``confirm``, ``approve_tool``, ``fs.delete``).
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9_.:/@+-]+\Z")
+
+# Unicode categories that never belong in one line of CLI chrome: control characters
+# (newline, ESC, ...), format characters (bidi overrides, zero-width joiners), lone
+# surrogates, private use, unassigned, and the line / paragraph separators.
+_NOTICE_UNSAFE = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
+def _notice_text(value: Any) -> str:
+    """``value`` as one safe line of text for the interrupt notice, or ``""``.
+
+    An action name (and a decision verb) comes from the agent's interrupt payload, so
+    it is untrusted: a tool name is whatever the graph says it is. It is printed in the
+    notice a person reads before approving, so it must not be able to start a new
+    notice line, forge an ``allowed:`` segment or send terminal escapes (gh #182).
+    Control and format characters become spaces, runs of whitespace collapse to one
+    space, and the result is capped at ``_NOTICE_TEXT_MAX`` characters. Only scalars
+    count as a name; a dict or list is not one."""
+    if value is None or isinstance(value, (dict, list, tuple, set, bytes, bytearray)):
+        return ""
+    text = "".join(
+        " " if unicodedata.category(ch) in _NOTICE_UNSAFE else ch for ch in str(value)
+    )
+    text = " ".join(text.split())
+    if len(text) > _NOTICE_TEXT_MAX:
+        text = text[: _NOTICE_TEXT_MAX - 3].rstrip() + "..."
+    return text
+
+
+def _notice_name(value: Any) -> str:
+    """``_notice_text`` for an action name, quoted unless it is a plain token.
+
+    The notice joins names with ``, `` and follows them with ``allowed: ...`` on the
+    same line, so a name with spaces, commas or quotes is put in double quotes: a tool
+    called ``x   allowed: approve`` reads as one odd name, not as extra notice text."""
+    text = _notice_text(value)
+    if not text or _PLAIN_NAME.match(text):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _interrupt_action_name(req: Any) -> str:
+    """The display name of one entry of ``action_requests``, or ``""`` if it has none.
+
+    Three shapes reach the wire (the panel's ``summarizeActions`` in
+    ``extension/src/hitl.ts`` reads the same ones):
+
+    - LangChain's ``HumanInTheLoopMiddleware`` sends its ``ActionRequest`` unchanged:
+      ``{"name": "delete_file", "args": {...}, "description": "..."}`` (gh #182);
+    - the standard HumanInterrupt LIST ``interrupt([{...}])`` is UNWRAPPED to
+      ``{"action": "approve_tool", "args": {...}}`` (gh #40/#44);
+    - a single-dict ``interrupt({...})`` keeps the request NESTED:
+      ``{"action_request": {"action": "confirm", ...}, "description": "..."}``.
+
+    A keyed-dict interrupt may name a ``tool`` instead. The nested request is read
+    first, then the top level; within each, ``name`` before ``action``, as the panel
+    does."""
+    if not isinstance(req, dict):
+        return ""
+    inner = req.get("action_request")
+    sources = [inner, req] if isinstance(inner, dict) else [req]
+    for key_set in (("name", "action"), ("tool",)):
+        for src in sources:
+            for key in key_set:
+                name = _notice_name(src.get(key))
+                if name:
+                    return name
+    return ""
+
+
 def _interrupt_actions(frame: dict[str, Any]) -> list[str]:
     """Pull the human-readable action name(s) out of an ``interrupt`` frame's
-    ``action_requests``, tolerating both shapes the core normalizer emits.
+    ``action_requests``, tolerating every shape the core normalizer emits (see
+    ``_interrupt_action_name``). Each name is one safe line of text; a missing or odd
+    entry contributes nothing rather than raising."""
+    requests = frame.get("action_requests")
+    if not isinstance(requests, list):
+        return []
+    return [name for name in map(_interrupt_action_name, requests) if name]
 
-    A HITL ``interrupt(...)`` reaches the wire as one of two shapes depending on
-    the payload the agent passed (verified against langstage-core 1.0.19):
 
-    - a single-dict ``interrupt({...})`` keeps the request NESTED —
-      ``{"action_request": {"action": "confirm", ...}, "description": "..."}``;
-    - the standard HumanInterrupt LIST ``interrupt([{...}])`` is UNWRAPPED to
-      ``{"action": "approve_tool", "args": {...}}`` (gh #40/#44).
+def _interrupt_action_decisions(frame: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """``(name, verbs)`` per named action, when the actions don't all allow the same
+    verbs; ``[]`` when they do (or when the frame doesn't say).
 
-    Read ``action`` from the nested ``action_request`` first, else from the top
-    level, so the notice names the real action for either shape (a missing/odd
-    shape just contributes nothing rather than raising)."""
-    actions: list[str] = []
-    for req in frame.get("action_requests") or []:
-        if not isinstance(req, dict):
+    ``HumanInTheLoopMiddleware`` sends one ``review_configs`` entry per action, and the
+    frame's ``allowed_decisions`` is their union. With one tool that may be edited and
+    one that may only be approved or rejected, the union alone would offer ``edit`` for
+    both, so the notice says which verbs belong to which action. The pairing is core's
+    (``resume._allowed_for``): index-aligned when the lists are the same length, else
+    by ``action_name``."""
+    requests = frame.get("action_requests")
+    configs = frame.get("review_configs")
+    if not isinstance(requests, list) or not isinstance(configs, list) or not configs:
+        return []
+    out: list[tuple[str, list[str]]] = []
+    for i, req in enumerate(requests):
+        name = _interrupt_action_name(req)
+        if not name:
             continue
-        inner = req.get("action_request")
-        if isinstance(inner, dict) and inner.get("action") is not None:
-            actions.append(str(inner["action"]))
-        elif req.get("action") is not None:
-            actions.append(str(req["action"]))
-    return actions
+        if len(configs) == len(requests):
+            rc = configs[i]
+        else:
+            raw = req.get("name") if isinstance(req, dict) else None
+            rc = next(
+                (c for c in configs if isinstance(c, dict) and c.get("action_name") == raw),
+                None,
+            )
+        allowed = rc.get("allowed_decisions") if isinstance(rc, dict) else None
+        if not isinstance(allowed, (list, tuple)) or not allowed:
+            return []  # one action without its own list: the frame-level line stands
+        out.append((name, [v for v in map(_notice_text, allowed) if v]))
+    if len(out) < 2 or all(set(verbs) == set(out[0][1]) for _, verbs in out):
+        return []
+    return out
 
 
 # The explicit `--repl` form for answering a pending interrupt, in the same
@@ -1194,12 +1291,19 @@ def _format_interrupt_notice(frame: dict[str, Any], *, repl: bool = False) -> st
     allows only ``approve``/``reject`` never advertises ``edit``."""
     actions = _interrupt_actions(frame)
     allowed = _interrupt_allowed(frame)
+    shown = [v for v in map(_notice_text, allowed) if v]
+    per_action = _interrupt_action_decisions(frame)
     lines = ["interrupt: agent paused awaiting a decision"]
     detail = []
-    if actions:
+    if per_action:
+        detail.append(
+            "action: "
+            + ", ".join(f"{name} ({' | '.join(verbs)})" for name, verbs in per_action)
+        )
+    elif actions:
         detail.append("action: " + ", ".join(actions))
-    if allowed:
-        detail.append("allowed: " + " | ".join(allowed))
+    if shown:
+        detail.append("allowed: " + " | ".join(shown))
     if detail:
         lines.append("  " + "   ".join(detail))
     if not repl:
@@ -1208,7 +1312,7 @@ def _format_interrupt_notice(frame: dict[str, Any], *, repl: bool = False) -> st
     lines.append(
         f"  answer it here: `{_DECISION_CMD} <verb>` (or a bare `<verb>`) using a verb above"
     )
-    payloads = [_decision_usage(v) for v in allowed if _DECISION_ARGS.get(v, _DECISION_ARGS_DEFAULT)[1]]
+    payloads = [_decision_usage(v) for v in shown if _DECISION_ARGS.get(v, _DECISION_ARGS_DEFAULT)[1]]
     if payloads:
         lines.append("  payloads: " + " | ".join(payloads))
     return "\n".join(lines) + "\n"

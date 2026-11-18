@@ -300,6 +300,13 @@ $ echo $?
 2
 ```
 
+The `action:` name is the waiting tool (or your own `interrupt(...)` payload's `action`). For
+LangChain's `HumanInTheLoopMiddleware` it is the tool's name, e.g. `action: delete_file`. If
+several tools are waiting and they don't allow the same decisions, each is listed with its own:
+`action: delete_file (approve | reject), send_note (approve | edit | reject)`. The name is
+shown on one line: control characters are dropped, a very long name is cut off, and a name
+with spaces or punctuation is put in quotes.
+
 With `--json`, the raw `{"type": "interrupt", ...}` frame streams on stdout, so a consumer keys
 on it directly.
 
