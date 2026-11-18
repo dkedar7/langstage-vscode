@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.44] - 2026-11-18
+
+Sidecar only; the extension is unchanged.
+
+### Fixed
+- **The interrupt notice names the tool for a `HumanInTheLoopMiddleware` approval**
+  (gh #182). `--message` and `--repl` print a notice on stderr when a turn pauses, and in
+  `--repl` you answer from it. For LangChain's `HumanInTheLoopMiddleware` (the usual
+  `create_agent` / `deepagents` approval) the `action:` part was missing, so you were
+  asked to `approve` without being told which tool was waiting. The middleware names the
+  tool under `name` and the notice read only `action`. It now reads `name`, `action` and
+  `tool`, nested or not, the same shapes the panel reads:
+
+  ```
+  interrupt: agent paused awaiting a decision
+    action: delete_file   allowed: reject | edit | respond | approve
+  ```
+
+- **Several tools waiting with different rules each show their own verbs.** The
+  `allowed:` list is the union across the waiting tools, so on its own it could offer
+  `edit` for a tool that only allows approve or reject. When the tools differ, each is
+  listed with its own: `action: delete_file (approve | reject), send_note (approve | edit | reject)`.
+- **An action name is kept to one safe line.** The name is the agent's own text. Control
+  and format characters (newlines, terminal escapes, bidi overrides) become spaces, a
+  name longer than 80 characters is cut off, and a name that isn't a plain token is put
+  in double quotes, so a tool name can't add notice lines or pass itself off as the
+  `allowed:` list. The verbs in the notice get the same treatment.
+
+`--json` output is unchanged: the frame goes out exactly as before.
+
 ## [Extension 0.6.7] - 2026-11-15
 
 Works with any sidecar; needs no new one.
