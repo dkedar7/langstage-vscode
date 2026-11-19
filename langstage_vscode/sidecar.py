@@ -1108,6 +1108,17 @@ _PLAIN_NAME = re.compile(r"[A-Za-z0-9_.:/@+-]+\Z")
 _NOTICE_UNSAFE = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 
 
+def _one_line(value: Any) -> str:
+    """``str(value)`` as one line with no control or format characters (they become
+    spaces, and whitespace runs collapse to one space). ``_notice_text`` adds the
+    length cap; a refusal reason that quotes core's checks uses this uncapped, since
+    it can name the agent's tools (gh #184)."""
+    text = "".join(
+        " " if unicodedata.category(ch) in _NOTICE_UNSAFE else ch for ch in str(value)
+    )
+    return " ".join(text.split())
+
+
 def _notice_text(value: Any) -> str:
     """``value`` as one safe line of text for the interrupt notice, or ``""``.
 
@@ -1120,10 +1131,7 @@ def _notice_text(value: Any) -> str:
     count as a name; a dict or list is not one."""
     if value is None or isinstance(value, (dict, list, tuple, set, bytes, bytearray)):
         return ""
-    text = "".join(
-        " " if unicodedata.category(ch) in _NOTICE_UNSAFE else ch for ch in str(value)
-    )
-    text = " ".join(text.split())
+    text = _one_line(value)
     if len(text) > _NOTICE_TEXT_MAX:
         text = text[: _NOTICE_TEXT_MAX - 3].rstrip() + "..."
     return text
@@ -1217,6 +1225,17 @@ def _interrupt_action_decisions(frame: dict[str, Any]) -> list[tuple[str, list[s
     return out
 
 
+def _interrupt_action_count(frame: dict[str, Any]) -> int:
+    """How many decisions an answer to ``frame`` must carry.
+
+    Core's resume check (``decision_problems``) wants one decision per entry of
+    ``action_requests``, so a ``HumanInTheLoopMiddleware`` interrupt holding parallel
+    tool calls needs one per call (gh #184). A frame without a non-empty
+    ``action_requests`` list takes a single decision."""
+    requests = frame.get("action_requests")
+    return len(requests) if isinstance(requests, list) and requests else 1
+
+
 # The explicit `--repl` form for answering a pending interrupt, in the same
 # `:`-prefixed command namespace as `:quit` (see ``_REPL_QUIT``). Named here because
 # the interrupt notice prints it as the literal syntax to type (gh #63).
@@ -1267,6 +1286,10 @@ _DECISION_ARGS: dict[str, tuple[bool, str | None]] = {
 _DECISION_ARGS_DEFAULT: tuple[bool, str | None] = (False, "text")
 
 
+# The per-action answer form the notice and refusal hints print (gh #184).
+_LIST_EXAMPLE = '[{"type": "approve"}, {"type": "reject"}]'
+
+
 def _decision_usage(verb: str) -> str:
     """One token of usage help for ``verb`` — ``approve`` / ``reject [<text>]`` /
     ``respond <text>`` / ``edit <json>``."""
@@ -1312,6 +1335,12 @@ def _format_interrupt_notice(frame: dict[str, Any], *, repl: bool = False) -> st
     lines.append(
         f"  answer it here: `{_DECISION_CMD} <verb>` (or a bare `<verb>`) using a verb above"
     )
+    count = _interrupt_action_count(frame)
+    if count > 1:
+        lines.append(
+            f"  one verb answers all {count} actions; to answer each one, give a JSON "
+            f"list in order: `{_DECISION_CMD} " + _LIST_EXAMPLE + "`"
+        )
     payloads = [_decision_usage(v) for v in shown if _DECISION_ARGS.get(v, _DECISION_ARGS_DEFAULT)[1]]
     if payloads:
         lines.append("  payloads: " + " | ".join(payloads))
@@ -1486,34 +1515,95 @@ def _parse_repl_decision(
     payload = payload.strip()
     canon = _decision_allowed(verb, allowed)
     if canon is None:
-        return None, f"`{verb}` is not a decision this interrupt allows"
+        return None, f"`{_notice_text(verb)}` is not a decision this interrupt allows"
     # Send the frame's spelling when the verb names an advertised entry, else the alias
     # as typed (lowercased). The payload grammar is looked up by the canonical verb.
     match = next((a for a in allowed if a.lower() == verb.lower()), verb.lower())
+    # The frame's spelling is the agent's text: echo it only as one safe token.
+    shown = _notice_text(match)
 
     required, kind = _DECISION_ARGS.get(canon, _DECISION_ARGS_DEFAULT)
     if kind is None and payload:
         # `approve some junk` is a typo or a misunderstanding, not an approval with a
         # note — refuse rather than send a decision carrying a field the shape has no
         # room for.
-        return None, f"`{match}` takes no payload (got {payload!r})"
+        return None, f"`{shown}` takes no payload (got {payload!r})"
     if required and not payload:
-        return None, f"`{match}` needs a payload -- {_decision_usage(canon)}"
+        return None, f"`{shown}` needs a payload -- {_decision_usage(canon)}"
     if not payload:
         return {"type": match}, None
     if kind == "json" or payload.startswith("{"):
         try:
             obj = json.loads(payload)
         except json.JSONDecodeError as exc:
-            return None, f"`{match}` payload is not valid JSON: {exc}"
+            return None, f"`{shown}` payload is not valid JSON: {exc}"
         if not isinstance(obj, dict):
-            return None, f"`{match}` payload must be a JSON object -- {_decision_usage(match)}"
+            return None, f"`{shown}` payload must be a JSON object -- {_decision_usage(canon)}"
         return {**obj, "type": match}, None
     return {"type": match, "message": payload}, None
 
 
+def _repl_decisions(
+    text: str, frame: dict[str, Any]
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """The ``decisions`` list one ``--repl`` answer line sends to ``frame``.
+
+    Returns ``(decisions, None)`` or ``(None, reason)``. Core wants one decision per
+    waiting action (gh #184):
+
+    - a verb (``approve``, ``reject <text>``, ...) answers every action the same way,
+      as the panel and ``@langstage`` do. It goes out once per action;
+    - a JSON list (``[{"type": "approve"}, {"type": "reject"}]``) answers each action
+      in order, and must have exactly one decision per action.
+
+    Either way the list is checked with core's own ``decision_problems`` before it is
+    sent, so an answer core would refuse (``edit`` repeated onto an action that only
+    allows ``approve``/``reject``, a list of the wrong length) is refused here, inline,
+    and the interrupt stays pending."""
+    allowed = _interrupt_allowed(frame)
+    count = _interrupt_action_count(frame)
+    repeated = not text.startswith("[")
+    if repeated:
+        decision, reason = _parse_repl_decision(text, allowed)
+        if decision is None:
+            return None, reason
+        decisions = [dict(decision) for _ in range(count)]
+    else:
+        try:
+            items = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return None, f"the decision list is not valid JSON: {exc}"
+        if not isinstance(items, list) or not items:
+            return None, "a decision list must be a non-empty JSON list of objects"
+        for i, item in enumerate(items, 1):
+            verb = item.get("type") if isinstance(item, dict) else None
+            if not isinstance(verb, str) or not verb.strip():
+                return None, f'decision {i} must be an object with a string "type"'
+            if _decision_allowed(verb, allowed) is None:
+                return None, (
+                    f"decision {i}: `{_notice_text(verb)}` is not a decision this "
+                    "interrupt allows"
+                )
+        if len(items) != count:
+            return None, (
+                f"{count} action(s) are waiting but the list has {len(items)} "
+                "decision(s); give one per action, in order"
+            )
+        decisions = items
+    problems = decision_problems({"decisions": decisions}, frame)
+    if problems:
+        reason = "; ".join(_one_line(p) for p in problems)
+        if repeated and count > 1:
+            reason += (
+                f" -- that verb can't answer all {count} actions; answer each one with "
+                f"a JSON list in order, e.g. `{_DECISION_CMD} " + _LIST_EXAMPLE + "`"
+            )
+        return None, reason
+    return decisions, None
+
+
 def _decision_refusal_notice(
-    text: str, reason: str, allowed: list[str], *, pending: bool
+    text: str, reason: str, allowed: list[str], *, pending: bool, actions: int = 1
 ) -> str:
     """The stderr note for a ``--repl`` line that could not be answered as a decision.
 
@@ -1534,9 +1624,15 @@ def _decision_refusal_notice(
             "  the interrupt is still pending -- answer with "
             f"`{_DECISION_CMD} <verb>` or a bare `<verb>`"
         )
-        if allowed:
-            hint += ": " + " | ".join(_decision_usage(v) for v in allowed)
+        shown = [v for v in map(_notice_text, allowed) if v]
+        if shown:
+            hint += ": " + " | ".join(_decision_usage(v) for v in shown)
         lines.append(hint)
+        if actions > 1:
+            lines.append(
+                f"  a verb answers all {actions} actions; a JSON list "
+                f"(`{_DECISION_CMD} " + _LIST_EXAMPLE + "`) answers each one in order"
+            )
         lines.append("  (`:quit` ends the session and leaves the interrupt unanswered)")
     else:
         lines.append(
@@ -1717,6 +1813,7 @@ def _run_repl(
                 reason,
                 _interrupt_allowed(frame or {}),
                 pending=frame is not None,
+                actions=_interrupt_action_count(frame or {}),
             ),
             stderr,
         )
@@ -1769,10 +1866,10 @@ def _run_repl(
                 if not answer:
                     refuse(text, f"`{_DECISION_CMD}` needs a verb", pending)
                     continue
-                decision, reason = _parse_repl_decision(
-                    answer, _interrupt_allowed(pending)
-                )
-                if decision is None:
+                # One decision per waiting action (gh #184), checked with core's
+                # own resume rules before anything is sent.
+                decisions, reason = _repl_decisions(answer, pending)
+                if decisions is None:
                     refuse(text, reason or "unparseable", pending)
                     continue
                 # Same session_id (hence thread_id) as the turn that interrupted, so
@@ -1781,7 +1878,7 @@ def _run_repl(
                     {
                         "type": "decision",
                         "session_id": session_id,
-                        "decisions": [decision],
+                        "decisions": decisions,
                     }
                 )
                 continue
