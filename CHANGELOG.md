@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.45] - 2026-11-19
+
+Sidecar only; the extension is unchanged.
+
+### Fixed
+- **`--repl` can answer an interrupt with several tools waiting** (gh #184). When the
+  model makes parallel tool calls, `HumanInTheLoopMiddleware` asks about all of them in
+  one interrupt, and langstage-core wants one decision per tool. `--repl` sent exactly
+  one, so every answer was refused ("2 action(s) are waiting for a decision but 1 were
+  sent"), and the session could only end with `:quit` (exit `2`). Now:
+  - a verb (`approve`, `:decision reject not now`, ...) answers every waiting tool the
+    same way, as the panel and `@langstage` already do;
+  - a JSON list answers each tool in the order the notice names them:
+    `:decision [{"type": "approve"}, {"type": "reject"}]`;
+  - the answer is checked with core's own resume rules before it is sent. A verb that
+    one of the tools doesn't allow, or a list of the wrong length, is refused inline,
+    with the interrupt still pending. The refusal says which tool and what to type.
+
+  The `--repl` notice says this when more than one tool is waiting:
+
+  ```
+    one verb answers all 2 actions; to answer each one, give a JSON list in order: `:decision [{"type": "approve"}, {"type": "reject"}]`
+  ```
+- **Refusal messages keep the agent's text to one safe line.** When `--repl` refuses an
+  answer, it no longer echoes raw control characters from the interrupt. This covers
+  the verbs the interrupt allows and the tool names core's check quotes back. They get
+  the same treatment as the 0.5.44 notice.
+
 ## [0.5.44] - 2026-11-18
 
 Sidecar only; the extension is unchanged.

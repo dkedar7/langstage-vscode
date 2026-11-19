@@ -331,6 +331,11 @@ resumed with: {'decisions': [{'type': 'approve'}]}
   offers and accepts exactly `reject | approve` (the legacy aliases below are accepted too). Payloads follow the LangChain HITL decisions:
   `approve`, `reject [<text>]`, `respond <text>`, `edit <json>` (free text becomes `message`, a
   JSON object is merged in, e.g. `edit {"edited_action": {"name": "confirm", "args": {}}}`).
+- **Several tools waiting at once** (the model made parallel tool calls): a verb answers every
+  one of them the same way, as the panel does. To answer each one differently, give a JSON list
+  in the order the notice names them: `:decision [{"type": "approve"}, {"type": "reject"}]`. A
+  verb that one of the tools doesn't allow, or a list of the wrong length, is refused before
+  anything is sent.
 - While an interrupt is pending, a line that **isn't** a valid decision is **refused on stderr and
   re-prompted** with the interrupt left pending — it is never silently sent as a new message (which
   would just re-interrupt and look accepted) and never swallowed. `:quit` is always the way out.
