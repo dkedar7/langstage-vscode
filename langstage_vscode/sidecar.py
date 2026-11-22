@@ -45,7 +45,7 @@ from langstage_core import apply_workspace, load_agent_spec, workspace_root
 # UnicodeEncodeError. Every human-readable text path goes through core's shared helper,
 # which backslash-escapes what the stream can't encode (core 1.0.36, replacing the
 # sidecar's own `_write_safe` copy). The JSON protocol path is ASCII via ensure_ascii.
-from langstage_core.console import safe_write
+from langstage_core.console import agent_stdout_to_stderr, safe_write
 # Decision-verb matching (core >= 1.0.37, gh #117/#114): canonical verbs plus the legacy
 # aliases (accept/ignore/response), which both drivers validate a decision against.
 from langstage_core.resume import decision_problems, normalize_decision
@@ -552,10 +552,16 @@ def run(
                 turn_interrupt[:] = [frame]
             emit(frame)
 
-        saw_interrupt, cancelled = _run_turn_agui(
-            agui_agent, agui_message, agui_resume, config, max_result_len, turn_emit,
-            should_cancel=should_cancel, extractors=extractors,
-        )
+        # gh #187: stdout is the frame wire (or the --message reply). What a node, a tool
+        # or a chatty SDK prints DURING the turn goes to stderr, as import-time prints
+        # already do; a partial line there used to glue onto the next frame, and the panel
+        # dropped that frame as non-JSON. Frames still reach the real stream: emit() writes
+        # to the `stdout` this loop was handed, captured before the redirect.
+        with agent_stdout_to_stderr():
+            saw_interrupt, cancelled = _run_turn_agui(
+                agui_agent, agui_message, agui_resume, config, max_result_len, turn_emit,
+                should_cancel=should_cancel, extractors=extractors,
+            )
         # gh #67: a cancelled turn emits `cancelled` (not `complete`) then `turn_end`,
         # and leaves the session/checkpointer intact — the next turn keeps memory. gh
         # #65: otherwise, this turn's interrupt-or-not is the session's new pending

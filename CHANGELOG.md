@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.46] - 2026-11-22
+
+Sidecar only; the extension is unchanged.
+
+### Fixed
+- **What an agent prints during a turn goes to stderr, so it can't corrupt a frame**
+  (gh #187). stdout is the NDJSON wire the panel reads. Prints at import time already
+  went to stderr, but a node, a tool or a chatty SDK printing during the turn wrote onto
+  stdout. A print without a newline (`print("working...", end="")`) was glued onto the
+  front of the next frame, and the panel dropped that line as non-JSON, so the reply
+  (or a `tool_end`, or the `interrupt`) never arrived. A print with a newline was
+  dropped too, and on `--message` it ended up in the reply. Now every turn runs with
+  `sys.stdout` pointed at stderr, using langstage-core's `agent_stdout_to_stderr()`:
+  the stdio loop, `--message` (plain and `--json`), `--repl` and `--selfcheck` keep
+  stdout for frames or the reply, and the agent's own output goes to the sidecar's
+  stderr (on the command line, it shows in the terminal).
+
 ## [0.5.45] - 2026-11-19
 
 Sidecar only; the extension is unchanged.
