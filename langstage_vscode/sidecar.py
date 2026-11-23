@@ -1992,13 +1992,68 @@ class _GuardedStdout:
         return getattr(self._stream, name)
 
 
+def _move_wire_off_fd1(stream: Any) -> tuple[Any, Callable[[], None]]:
+    """Give stdout's writes their own fd and point fd 1 at stderr (gh #189).
+
+    stdout is the frame wire (or the one-shot reply). gh #187 swaps ``sys.stdout``
+    during a turn, which catches Python-level prints, but a child process the agent
+    starts (``os.system``, ``subprocess.run`` without ``capture_output``) inherits
+    file descriptor 1, and native code writes to it directly. Either put bytes on the
+    wire that could glue onto the next frame. So, once at startup: duplicate fd 1 for
+    the wire, then make fd 1 a copy of stderr. Anything the agent's process tree
+    writes to fd 1 lands on stderr; the sidecar's own writes go through the returned
+    stream, which writes exactly as ``stream`` did (same encoding, error handler and
+    newline translation).
+
+    Returns ``(wire, restore)``. ``restore`` flushes the wire and puts the original fd
+    1 back, so an in-process caller (a test) is left as it was. When ``stream`` isn't
+    the process's real fd 1 (a test double, captured output), nothing moves and
+    ``(stream, no-op)`` comes back.
+    """
+    try:
+        if stream.fileno() != 1:
+            return stream, lambda: None
+        stream.flush()
+        wire_fd = os.dup(1)
+    except (AttributeError, OSError, ValueError):
+        return stream, lambda: None
+    try:
+        os.dup2(2, 1)
+    except OSError:
+        os.close(wire_fd)
+        return stream, lambda: None
+    # newline=None writes os.linesep, as the interpreter's own stdout does, so the
+    # frames on the wire are byte-for-byte what they were.
+    wire = open(  # noqa: SIM115 - closed by restore()
+        wire_fd, "w", encoding=getattr(stream, "encoding", None) or "utf-8",
+        errors=getattr(stream, "errors", None) or "strict", newline=None,
+        buffering=1 if getattr(stream, "line_buffering", False) else -1,
+    )
+
+    def restore() -> None:
+        try:
+            wire.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            os.dup2(wire_fd, 1)
+        except OSError:
+            pass
+        try:
+            wire.close()
+        except (OSError, ValueError):
+            pass
+
+    return wire, restore
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for ``langstage-vscode-sidecar`` and ``python -m langstage_vscode``."""
     import sys
 
     original = sys.stdout
-    if not isinstance(original, _GuardedStdout):
-        sys.stdout = _GuardedStdout(original)
+    wire, restore = _move_wire_off_fd1(original)
+    sys.stdout = wire if isinstance(wire, _GuardedStdout) else _GuardedStdout(wire)
     try:
         return _main(argv)
     except BrokenPipeError:
@@ -2008,12 +2063,13 @@ def main(argv: list[str] | None = None) -> int:
         # interpreter's shutdown flush doesn't raise a second BrokenPipeError. (gh #163)
         try:
             devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, original.fileno())
+            os.dup2(devnull, wire.fileno())
         except (OSError, ValueError):  # no real fd (e.g. under test capture)
             pass
         return 0
     finally:
         sys.stdout = original
+        restore()
 
 
 def _main(argv: list[str] | None = None) -> int:

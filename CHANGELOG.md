@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.47] - 2026-11-23
+
+Sidecar only; the extension is unchanged.
+
+### Fixed
+- **Output from a process the agent starts goes to stderr too** (gh #189). 0.5.46 sent
+  Python-level prints to stderr by swapping `sys.stdout`, but a child process (a tool
+  calling `os.system(...)` or `subprocess.run(...)` without capturing, such as `pip`,
+  `git` or a build script) inherits file descriptor 1, and native code writes to it
+  directly. That output still landed on the frame wire, and without a trailing newline
+  it was glued onto the next frame, which the panel dropped. The sidecar now gives its
+  own output a separate descriptor at startup and points fd 1 at stderr, so whatever
+  the agent's process tree writes there shows in the sidecar's stderr. Frames are
+  written exactly as before. This covers the stdio loop, `--message` (plain and
+  `--json`), `--repl` and `--selfcheck`.
+
 ## [0.5.46] - 2026-11-22
 
 Sidecar only; the extension is unchanged.
