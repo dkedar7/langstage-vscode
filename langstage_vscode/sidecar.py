@@ -2047,6 +2047,68 @@ def _move_wire_off_fd1(stream: Any) -> tuple[Any, Callable[[], None]]:
     return wire, restore
 
 
+def _move_commands_off_fd0(stdin: Any) -> tuple[Any, Callable[[], None]]:
+    """Give the command reader its own fd and point fd 0 at devnull (gh #191).
+
+    The input-side twin of ``_move_wire_off_fd1``. In the stdio loop, stdin is the
+    panel's command pipe. The agent's process tree shared it: a child process inherits
+    file descriptor 0 (a CLI that prompts with no TTY, ``read``, ``head``), and agent
+    code can call ``input()`` or ``sys.stdin.readline()``. Either consumed a command
+    meant for the sidecar, which then never answered it, so that conversation's turn
+    queue stalled. So, once at startup: duplicate fd 0 for the command reader, make
+    fd 0 a copy of devnull and point ``sys.stdin`` at devnull. The agent reading stdin
+    gets EOF, as under any non-interactive host, and only the sidecar reads commands.
+
+    Returns ``(commands, restore)``: ``commands`` is the line source for ``run()``
+    (undecoded bytes, read unbuffered, as ``_stdin_lines`` gives). ``restore`` puts
+    ``sys.stdin`` back for an in-process caller. fd 0 stays devnull and the private
+    fd stays open, since the daemon reader thread may still be blocked reading it. When
+    ``stdin`` isn't the process's real fd 0 (a test double), or is a Windows console
+    (whose reader decodes keyboard input itself), nothing moves and
+    ``(_stdin_lines(stdin), no-op)`` comes back.
+    """
+    import io
+    import sys
+
+    try:
+        if stdin.fileno() != 0:
+            return _stdin_lines(stdin), lambda: None
+        if os.name == "nt" and stdin.isatty():
+            return _stdin_lines(stdin), lambda: None
+        cmd_fd = os.dup(0)
+    except (AttributeError, OSError, ValueError):
+        return _stdin_lines(stdin), lambda: None
+    try:
+        null_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            os.dup2(null_fd, 0)
+        finally:
+            os.close(null_fd)
+    except OSError:
+        os.close(cmd_fd)
+        return _stdin_lines(stdin), lambda: None
+    # The reader reads the private fd unbuffered, as it read sys.stdin.buffer.raw
+    # (gh #151: a daemon thread blocked in a buffered read aborts finalization).
+    commands = io.FileIO(cmd_fd, "rb", closefd=False)
+    original = sys.stdin
+    sys.stdin = open(os.devnull, encoding="utf-8")  # noqa: SIM115 - closed by restore()
+    null_stdin = sys.stdin
+
+    def restore() -> None:
+        # fd 0 stays devnull. Putting the pipe back (dup2) while the daemon reader is
+        # still blocked reading it hangs on Windows, which serializes I/O on a
+        # synchronous pipe, so `shutdown` never exited. Nothing reads fd 0 after the
+        # loop: only sys.stdin, the Python-level object, is put back.
+        if sys.stdin is null_stdin:
+            sys.stdin = original
+        try:
+            null_stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    return _raw_lines(commands.read), restore
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for ``langstage-vscode-sidecar`` and ``python -m langstage_vscode``."""
     import sys
@@ -2394,10 +2456,17 @@ def _main(argv: list[str] | None = None) -> int:
     # holds no buffer lock when the interpreter finalizes (see _raw_lines): `shutdown`
     # exits 0 instead of aborting. A stream without a raw layer (a test double) is used
     # as-is.
-    served = run(
-        graph, _stdin_lines(sys.stdin), sys.stdout, spec=spec,
-        enable_cancel=True, extractors=extractors, configurable=configurable,
-    )
+    # gh #191: only the sidecar reads the command pipe. The reader gets its own fd and
+    # fd 0 / sys.stdin become devnull, so an agent or child that reads stdin sees EOF
+    # instead of swallowing the panel's next command.
+    commands, restore_stdin = _move_commands_off_fd0(sys.stdin)
+    try:
+        served = run(
+            graph, commands, sys.stdout, spec=spec,
+            enable_cancel=True, extractors=extractors, configurable=configurable,
+        )
+    finally:
+        restore_stdin()
     # gh #158: a spec that loads but can't be served (an uncompiled StateGraph, a factory
     # function, a bare int, or an agent build that fails) is a startup failure, so exit 1,
     # like a spec that fails to load. run() has written `ready` and the `error` frame
