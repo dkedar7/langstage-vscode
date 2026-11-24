@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.48] - 2026-11-24
+
+Sidecar only; the extension is unchanged.
+
+### Fixed
+- **Only the sidecar reads the panel's commands; the agent's stdin is empty** (gh #191).
+  In the stdio loop, stdin is the pipe the panel sends commands on, and the agent's
+  process tree shared it. A tool that shelled out to a CLI that reads stdin (a prompt
+  such as `Proceed (y/n)?` or a git credential prompt, `read`, `head`), or agent code
+  calling `input()` or `sys.stdin.readline()`, could take the panel's next command.
+  That command got no reply, so the conversation waited forever, and the agent was
+  fed a line of protocol JSON. The sidecar now reads commands on its own descriptor
+  and gives the agent an empty stdin, as a non-interactive host does: reading it
+  returns end-of-file at once, so a prompting CLI fails fast instead of hanging, and
+  `input()` raises `EOFError`. `--message` and `--repl` are unchanged.
+
 ## [0.5.47] - 2026-11-23
 
 Sidecar only; the extension is unchanged.
